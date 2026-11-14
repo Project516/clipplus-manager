@@ -297,6 +297,19 @@ impl Slskd {
         }
     }
 
+    pub fn directory(&self, username: &str, directory: &str) -> Result<Vec<PeerFile>, String> {
+        let response = self.request(
+            "POST",
+            &format!("/api/v0/users/{}/directory", encode(username)),
+            Some(json!({"directory": directory})),
+        )?;
+        let files = parse_directory(&response, username, directory);
+        if files.is_empty() {
+            return Err("No audio files found in this folder".into());
+        }
+        Ok(files)
+    }
+
     pub fn enqueue(&self, file: &PeerFile) -> Result<Transfer, String> {
         let _lock = self
             .enqueue_lock
@@ -480,9 +493,115 @@ fn parse_results(value: &Value) -> Vec<PeerFile> {
         .collect()
 }
 
+fn is_audio(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(_, ext)| {
+        [
+            "mp3", "flac", "m4a", "ogg", "opus", "wav", "aac", "wma", "aiff", "alac",
+        ]
+        .iter()
+        .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+    })
+}
+
+pub fn album_candidates(files: Vec<PeerFile>) -> Vec<PeerFile> {
+    let mut folders: Vec<PeerFile> = Vec::new();
+    for file in files.into_iter().filter(|file| is_audio(&file.filename)) {
+        let Some((directory, _)) = file.filename.rsplit_once(['\\', '/']) else {
+            continue;
+        };
+        if directory.is_empty() {
+            continue;
+        }
+        if let Some(folder) = folders
+            .iter_mut()
+            .find(|folder| folder.username == file.username && folder.filename == directory)
+        {
+            folder.size += 1;
+        } else {
+            folders.push(PeerFile {
+                username: file.username,
+                filename: directory.to_string(),
+                size: 1,
+                length: None,
+                bitrate: None,
+            });
+        }
+    }
+    folders
+}
+
+fn parse_directory(value: &Value, username: &str, directory: &str) -> Vec<PeerFile> {
+    let separator = if directory.contains('/') { '/' } else { '\\' };
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("name").and_then(Value::as_str) == Some(directory))
+        .flat_map(|entry| {
+            entry
+                .get("files")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|file| {
+            let name = file.get("filename")?.as_str()?;
+            let size = file.get("size")?.as_u64()?;
+            if name.is_empty() || name.contains(['\\', '/']) || size == 0 || !is_audio(name) {
+                return None;
+            }
+            Some(PeerFile {
+                username: username.to_string(),
+                filename: format!("{directory}{separator}{name}"),
+                size,
+                length: file.get("length").and_then(Value::as_u64),
+                bitrate: file.get("bitRate").and_then(Value::as_u64),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn album_folders_and_directory_contents() {
+        let results = parse_results(&json!([
+            {"username":"peer", "files":[
+                {"filename":"Artist\\Album\\01.flac", "size":100},
+                {"filename":"Artist\\Album\\02.mp3", "size":200},
+                {"filename":"Artist\\Album\\cover.jpg", "size":300}
+            ]},
+            {"username":"other", "files":[{"filename":"Artist\\Album\\01.flac", "size":100}]}
+        ]));
+        let folders = album_candidates(results);
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[0].filename, "Artist\\Album");
+        assert_eq!(folders[0].size, 2);
+        let files = parse_directory(
+            &json!([
+                {"name":"Artist\\Album", "files":[
+                    {"filename":"01.flac", "size":100},
+                    {"filename":"02.MP3", "size":200},
+                    {"filename":"cover.jpg", "size":300},
+                    {"filename":"..\\evil.mp3", "size":100}
+                ]},
+                {"name":"Other", "files":[{"filename":"other.mp3", "size":100}]}
+            ]),
+            "peer",
+            "Artist\\Album",
+        );
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].filename, "Artist\\Album\\01.flac");
+        assert_eq!(files[1].username, "peer");
+        let root = parse_directory(
+            &json!([{ "name": "Album", "files": [{ "filename": "01.flac", "size": 100 }] }]),
+            "peer",
+            "Album",
+        );
+        assert_eq!(root[0].filename, "Album\\01.flac");
+    }
+
     #[test]
     fn parses_peer_files_and_encodes_names() {
         let value = json!([{"username":"user/one","files":[{"filename":"music\\song.flac","size":100,"length":180,"bitRate":900}, {"filename":"empty","size":0}]}]);

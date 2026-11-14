@@ -13,8 +13,16 @@ Kirigami.Page {
     property int step: 0
     property bool searched: false
     property string trackTitle: ""
+    property bool albumMode: false
 
     signal downloadStarted
+
+    function goBack() {
+        backend.cancelAlbumSearch();
+        step = 0;
+    }
+
+    Component.onDestruction: backend.cancelAlbumSearch()
 
     function duration(ms) {
         const seconds = Math.floor(ms / 1000);
@@ -22,17 +30,25 @@ Kirigami.Page {
     }
 
     function search() {
+        if (query.text.trim() === "" || (albumMode && !backend.soulseekReady))
+            return;
         searched = query.text.trim() !== "";
-        backend.searchMusic(query.text);
+        if (albumMode) {
+            trackTitle = query.text.trim();
+            backend.searchAlbums(trackTitle);
+            step = 1;
+        } else {
+            backend.searchMusic(query.text);
+        }
     }
 
-    title: step === 0 ? "Find music" : "Choose a file"
+    title: step === 0 ? "Find music" : (albumMode ? "Choose an album folder" : "Choose a file")
     actions: [
         Kirigami.Action {
             text: "Back"
             icon.name: "go-previous"
             visible: page.step === 1
-            onTriggered: page.step = 0
+            onTriggered: page.goBack()
         }
     ]
 
@@ -43,6 +59,10 @@ Kirigami.Page {
 
     Connections {
         target: page.backend
+        function onAlbumQueued() {
+            page.step = 0;
+            page.downloadStarted();
+        }
         function onSearchResultsChanged() {
             songs.currentIndex = -1;
         }
@@ -58,6 +78,12 @@ Kirigami.Page {
         ColumnLayout {
             spacing: Kirigami.Units.smallSpacing
 
+            Controls.ComboBox {
+                model: ["Song", "Album"]
+                Accessible.name: "Search for"
+                onCurrentIndexChanged: page.albumMode = currentIndex === 1
+            }
+
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.smallSpacing
@@ -65,15 +91,15 @@ Kirigami.Page {
                 Controls.TextField {
                     id: query
                     Layout.fillWidth: true
-                    placeholderText: "Artist and song"
-                    Accessible.name: "Artist and song"
+                    placeholderText: page.albumMode ? "Artist and album" : "Artist and song"
+                    Accessible.name: placeholderText
                     onAccepted: page.search()
                 }
                 Controls.Button {
                     text: "Search"
                     icon.name: "search"
                     highlighted: enabled
-                    enabled: query.text.trim() !== ""
+                    enabled: query.text.trim() !== "" && (!page.albumMode || page.backend.soulseekReady)
                     onClicked: page.search()
                 }
             }
@@ -108,7 +134,7 @@ Kirigami.Page {
 
             Kirigami.InlineMessage {
                 Layout.fillWidth: true
-                visible: page.backend.searchError !== ""
+                visible: !page.albumMode && page.backend.searchError !== ""
                 text: page.backend.searchError
                 type: Kirigami.MessageType.Error
             }
@@ -116,7 +142,7 @@ Kirigami.Page {
             Kirigami.Heading {
                 level: 4
                 text: "Choose a song"
-                visible: songs.count > 0
+                visible: !page.albumMode && songs.count > 0
             }
 
             ListView {
@@ -127,7 +153,7 @@ Kirigami.Page {
                 currentIndex: -1
                 keyNavigationEnabled: true
                 activeFocusOnTab: true
-                model: page.backend.searchResults === "" ? [] : JSON.parse(page.backend.searchResults)
+                model: page.albumMode || page.backend.searchResults === "" ? [] : JSON.parse(page.backend.searchResults)
                 Controls.ScrollBar.vertical: Controls.ScrollBar {}
                 delegate: Controls.ItemDelegate {
                     required property var modelData
@@ -156,16 +182,16 @@ Kirigami.Page {
 
                 Controls.BusyIndicator {
                     anchors.centerIn: parent
-                    running: page.backend.searching
+                    running: !page.albumMode && page.backend.searching
                     visible: running
                 }
                 Kirigami.PlaceholderMessage {
                     anchors.centerIn: parent
                     width: parent.width - Kirigami.Units.gridUnit * 4
-                    visible: !page.backend.searching && page.backend.searchError === "" && songs.count === 0
+                    visible: page.albumMode || (!page.backend.searching && page.backend.searchError === "" && songs.count === 0)
                     icon.name: "search"
-                    text: page.searched ? "No recordings found" : "Search MusicBrainz for a song"
-                    explanation: page.searched ? "" : "Then pick a file from Soulseek. It is saved as mp3 and copied to your Sansa."
+                    text: page.albumMode ? "Search Soulseek for an album" : (page.searched ? "No recordings found" : "Search MusicBrainz for a song")
+                    explanation: page.albumMode ? "Choose a folder to download its songs." : (page.searched ? "" : "Then pick a file from Soulseek. It is saved as mp3 and copied to your Sansa.")
                 }
             }
 
@@ -174,6 +200,7 @@ Kirigami.Page {
                 text: "Find downloads"
                 icon.name: "go-next"
                 highlighted: enabled
+                visible: !page.albumMode
                 enabled: page.backend.soulseekReady && songs.currentIndex >= 0 && !page.backend.searching
                 onClicked: {
                     const selected = songs.model[songs.currentIndex];
@@ -228,7 +255,7 @@ Kirigami.Page {
                         }
                         Controls.Label {
                             Layout.fillWidth: true
-                            text: modelData.username + " · " + (modelData.size / 1000000).toFixed(1) + " MB" + (modelData.bitrate ? " · " + modelData.bitrate + " kbps" : "") + (modelData.length ? " · " + page.duration(modelData.length * 1000) : "")
+                            text: page.albumMode ? modelData.username : modelData.username + " · " + (modelData.size / 1000000).toFixed(1) + " MB" + (modelData.bitrate ? " · " + modelData.bitrate + " kbps" : "") + (modelData.length ? " · " + page.duration(modelData.length * 1000) : "")
                             textFormat: Text.PlainText
                             elide: Text.ElideRight
                             color: Kirigami.Theme.disabledTextColor
@@ -255,20 +282,31 @@ Kirigami.Page {
                 Controls.Button {
                     text: "Back"
                     icon.name: "go-previous"
-                    onClicked: page.step = 0
+                    onClicked: page.goBack()
                 }
                 Item {
                     Layout.fillWidth: true
                 }
                 Controls.Button {
-                    text: "Download"
+                    visible: !page.albumMode
+                    text: "Download full album"
+                    icon.name: "download"
+                    enabled: !page.backend.peerSearching && files.currentIndex >= 0
+                    onClicked: page.backend.downloadPeerAlbum(files.currentIndex)
+                }
+                Controls.Button {
+                    text: page.albumMode ? "Download album" : "Download"
                     icon.name: "download"
                     highlighted: enabled
                     enabled: !page.backend.peerSearching && files.currentIndex >= 0
                     onClicked: {
-                        page.backend.downloadPeer(files.currentIndex);
-                        page.step = 0;
-                        page.downloadStarted();
+                        if (page.albumMode) {
+                            page.backend.downloadAlbum(files.currentIndex);
+                        } else {
+                            page.backend.downloadPeer(files.currentIndex);
+                            page.step = 0;
+                            page.downloadStarted();
+                        }
                     }
                 }
             }
