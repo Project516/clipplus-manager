@@ -182,7 +182,8 @@ enum Msg {
 
 #[derive(Default)]
 struct GateState {
-    busy: bool,
+    // A count, because the next job can take its guard before the last one drops.
+    running: usize,
     stopping: bool,
 }
 
@@ -192,7 +193,7 @@ struct GateState {
 struct Gate(Arc<(Mutex<GateState>, Condvar)>);
 
 /// Held by the Rockbox worker. Dropping it, even after a panic or a failed
-/// thread spawn, clears the busy flag.
+/// thread spawn, releases its count.
 struct GateGuard(Gate);
 
 impl Gate {
@@ -206,7 +207,7 @@ impl Gate {
         if state.stopping {
             return None;
         }
-        state.busy = true;
+        state.running += 1;
         Some(GateGuard(self.clone()))
     }
 
@@ -216,7 +217,7 @@ impl Gate {
 
     fn wait_idle(&self) {
         let mut state = self.state();
-        while state.busy {
+        while state.running > 0 {
             state = (self.0).1.wait(state).unwrap_or_else(|e| e.into_inner());
         }
     }
@@ -224,7 +225,7 @@ impl Gate {
 
 impl Drop for GateGuard {
     fn drop(&mut self) {
-        self.0.state().busy = false;
+        self.0.state().running -= 1;
         (self.0.0).1.notify_all();
     }
 }
@@ -2395,6 +2396,24 @@ fn spawn_updater(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_waits_for_overlapping_jobs() {
+        let gate = Gate::default();
+        let first = gate.acquire().unwrap();
+        let second = gate.acquire().unwrap();
+        drop(first);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = gate.clone();
+        let handle = std::thread::spawn(move || {
+            waiter.wait_idle();
+            tx.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(second);
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        handle.join().unwrap();
+    }
 
     #[test]
     fn soulseek_cleanup_keeps_only_awaited_downloads() {
