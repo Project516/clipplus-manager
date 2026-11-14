@@ -1050,6 +1050,24 @@ fn edit_setting(text: &str, key: &str, value: &str) -> String {
     lines.concat()
 }
 
+/// Reads the setting from `config.cfg`. Rockbox defaults to off when the line is
+/// missing. None when Rockbox is not installed or the file cannot be read.
+pub fn read_database_autoupdate(mount: &Path) -> Option<bool> {
+    if !mount.join(".rockbox").is_dir() {
+        return None;
+    }
+    let text = match fs::read(mount.join(CONFIG_FILE)) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(false),
+        Err(_) => return None,
+    };
+    let value = text.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "tagcache_autoupdate").then(|| value.trim().to_string())
+    });
+    Some(value.is_some_and(|v| v == "on"))
+}
+
 /// Turns the player's database auto update on or off in `config.cfg`.
 pub fn set_database_autoupdate(drive: &Drive, on: bool) -> Result<(), String> {
     if !drive.is_dir(Path::new(".rockbox")) {
@@ -1326,6 +1344,19 @@ about="Simple &lt;b&gt;"
             edit_setting("tagcache_autoupdate_x: 1\n", "tagcache_autoupdate", "on"),
             "tagcache_autoupdate_x: 1\ntagcache_autoupdate: on\n"
         );
+    }
+
+    #[test]
+    fn reads_the_autoupdate_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_database_autoupdate(dir.path()), None);
+        fs::create_dir(dir.path().join(".rockbox")).unwrap();
+        assert_eq!(read_database_autoupdate(dir.path()), Some(false));
+        let cfg = dir.path().join(CONFIG_FILE);
+        fs::write(&cfg, "volume: -20\r\ntagcache_autoupdate: on\r\n").unwrap();
+        assert_eq!(read_database_autoupdate(dir.path()), Some(true));
+        fs::write(&cfg, "tagcache_autoupdate: off\n").unwrap();
+        assert_eq!(read_database_autoupdate(dir.path()), Some(false));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The coordinator. One thread owns all job state and reacts to messages from
 //! the UI and from worker threads. Nothing polls.
 
+use crate::bootloader;
 use crate::card::{CardInfo, Udisks, Volumes};
 use crate::drive::Drive;
 use crate::musicbrainz::Recording;
@@ -95,7 +96,19 @@ pub enum UiEvent {
         can_roll_back: bool,
     },
     Themes(Vec<Theme>),
+    /// The player's database auto update setting. None when it cannot be read.
+    DatabaseAutoUpdate(Option<bool>),
+    /// The firmware file is on the player and the drive is ejected. True until
+    /// the player is unplugged and comes back.
+    FlashPending(bool),
+    /// The last Rockbox action failed.
+    RockboxFailed(bool),
+    /// Songs were copied to the card.
+    SongsCopied,
 }
+
+pub const UNPLUG_TEXT: &str = "Unplug the player now. It flashes the bootloader and powers off by itself in about a minute. Do not touch it.";
+pub const RESTORE_TEXT: &str = "Unplug the player. Then turn it on while holding Left (|<<), so the stock firmware starts and flashes the file. After that, use Uninstall to remove the .rockbox folder.";
 
 pub type Emit = Arc<dyn Fn(UiEvent) + Send + Sync>;
 
@@ -146,9 +159,11 @@ enum Msg {
     InternalEjected {
         result: Result<(), String>,
         text: String,
+        flash: bool,
     },
     Mtp(bool),
     Player(u64, PlayerState),
+    Autoupdate(u64, Option<bool>),
     RockboxCheck,
     RockboxChecked {
         channel: Channel,
@@ -309,6 +324,16 @@ impl Engine {
         self.queue_rockbox(RockboxJob::Autoupdate(on));
     }
     /// Loads the theme list for the installed (or newest) build.
+    pub fn rockbox_install_bootloader(&self) {
+        self.queue_rockbox(RockboxJob::Bootloader);
+    }
+    pub fn rockbox_restore_stock(&self) {
+        self.queue_rockbox(RockboxJob::RestoreStock);
+    }
+    /// Rockbox build, then the bootloader, for a player on the stock firmware.
+    pub fn rockbox_install_first(&self) {
+        self.queue_rockbox(RockboxJob::FirstInstall);
+    }
     pub fn rockbox_themes(&self) {
         let _ = self.tx.send(Msg::RockboxThemes);
     }
@@ -344,6 +369,23 @@ pub enum RockboxJob {
     Theme(String),
     Uninstall(bool),
     Autoupdate(bool),
+    Bootloader,
+    RestoreStock,
+    FirstInstall,
+}
+
+impl RockboxJob {
+    /// The player flashes a firmware file after these, so the job ends with an eject.
+    fn flashes(&self) -> bool {
+        matches!(
+            self,
+            Self::Bootloader | Self::RestoreStock | Self::FirstInstall
+        )
+    }
+
+    fn ejects(&self) -> bool {
+        self.flashes() || matches!(self, Self::Update | Self::Rollback)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,6 +445,8 @@ struct Core {
     internal_mounting: bool,
     internal_mount_failed: bool,
     internal_ejected: Option<String>,
+    flash_pending: bool,
+    flash_gone: bool,
     mtp: bool,
     player_generation: u64,
     player: Option<PlayerState>,
@@ -566,6 +610,8 @@ fn build_core(
         internal_mounting: false,
         internal_mount_failed: false,
         internal_ejected: None,
+        flash_pending: false,
+        flash_gone: false,
         mtp: false,
         player_generation: 0,
         player: None,
@@ -1068,13 +1114,25 @@ impl Core {
                     self.rockbox_status(false, format!("Could not mount the player: {e}"));
                 }
             }
-            Msg::InternalEjected { result, text } => {
+            Msg::InternalEjected {
+                result,
+                text,
+                flash,
+            } => {
                 let text = match result {
                     Ok(()) => {
                         self.internal_ejected = self.internal.as_ref().map(|c| c.block.clone());
+                        if flash {
+                            self.flash_pending = true;
+                            self.flash_gone = false;
+                            (self.emit)(UiEvent::FlashPending(true));
+                        }
                         text
                     }
-                    Err(e) => format!("{text} Could not eject the player: {e}"),
+                    Err(e) => {
+                        (self.emit)(UiEvent::RockboxFailed(true));
+                        format!("{text} Could not eject the player: {e}")
+                    }
                 };
                 self.rockbox_status(false, text);
                 self.rockbox_idle();
@@ -1089,6 +1147,11 @@ impl Core {
                     self.player = Some(state.clone());
                     (self.emit)(UiEvent::Player(state));
                     self.emit_latest();
+                }
+            }
+            Msg::Autoupdate(generation, value) => {
+                if generation == self.player_generation {
+                    (self.emit)(UiEvent::DatabaseAutoUpdate(value));
                 }
             }
             Msg::RockboxCheck => self.rockbox_check(),
@@ -1119,17 +1182,17 @@ impl Core {
             Msg::RockboxDone { job, result } => {
                 match result {
                     // The player stays busy until the eject is over.
-                    Ok(text)
-                        if !self.stopping
-                            && matches!(job, RockboxJob::Update | RockboxJob::Rollback) =>
-                    {
-                        self.eject_internal(text);
+                    Ok(text) if !self.stopping && job.ejects() => {
+                        (self.emit)(UiEvent::RockboxFailed(false));
+                        self.eject_internal(text, job.flashes());
                     }
                     Ok(text) => {
+                        (self.emit)(UiEvent::RockboxFailed(false));
                         self.rockbox_status(false, text);
                         self.rockbox_idle();
                     }
                     Err(e) => {
+                        (self.emit)(UiEvent::RockboxFailed(true));
                         self.rockbox_status(false, e);
                         self.rockbox_idle();
                     }
@@ -1178,6 +1241,7 @@ impl Core {
             }
             Msg::Copied(id) => {
                 self.batch_copied += 1;
+                (self.emit)(UiEvent::SongsCopied);
                 if let Some(job) = id.and_then(|id| self.job_mut(id)) {
                     job.stage = Stage::Copied;
                     job.outbox_file = None;
@@ -1417,6 +1481,14 @@ impl Core {
         let appeared = info
             .as_ref()
             .is_some_and(|i| previous.as_ref().is_none_or(|p| p.block != i.block));
+        if self.flash_pending {
+            if info.is_none() {
+                self.flash_gone = true;
+            } else if self.flash_gone {
+                self.flash_pending = false;
+                (self.emit)(UiEvent::FlashPending(false));
+            }
+        }
         match &info {
             None => {
                 self.internal_ejected = None;
@@ -1459,7 +1531,13 @@ impl Core {
         };
         let (mtp, tx) = (self.mtp, self.tx.clone());
         spawn("player-state", move || {
-            let _ = tx.send(Msg::Player(generation, player::read_state(&volumes, mtp)));
+            let state = player::read_state(&volumes, mtp);
+            let autoupdate = state
+                .internal
+                .as_ref()
+                .and_then(|v| rockbox::read_database_autoupdate(&v.mount));
+            let _ = tx.send(Msg::Autoupdate(generation, autoupdate));
+            let _ = tx.send(Msg::Player(generation, state));
         });
     }
 
@@ -1593,7 +1671,7 @@ impl Core {
 
     /// Unmounts the internal drive and powers it off, so the player can restart.
     /// The job stays busy until `InternalEjected` arrives.
-    fn eject_internal(&mut self, done: String) {
+    fn eject_internal(&mut self, done: String, flash: bool) {
         let (Some(eject), Some(card)) = (self.ejector.clone(), self.internal.clone()) else {
             self.rockbox_status(false, done);
             self.rockbox_idle();
@@ -1601,12 +1679,17 @@ impl Core {
         };
         self.rockbox_status(true, "Ejecting the player".into());
         let tx = self.tx.clone();
-        let text = format!("{done} Safe to unplug. Restart the player to use it.");
+        let text = if flash {
+            done
+        } else {
+            format!("{done} Safe to unplug. Restart the player to use it.")
+        };
         spawn("eject-player", move || {
             rustix::fs::sync();
             let _ = tx.send(Msg::InternalEjected {
                 result: eject(&card),
                 text,
+                flash,
             });
         });
     }
@@ -2215,6 +2298,7 @@ fn run_rockbox(
     progress: &dyn Fn(&str),
 ) -> Result<String, String> {
     let agent = net::agent();
+    let firmware = work.join("firmware");
     let resolve = || {
         let info = rockbox::fetch_build_info(&agent, work)?;
         let build = info.build(channel)?;
@@ -2252,6 +2336,21 @@ fn run_rockbox(
             let count = rockbox::uninstall(drive, *full)?;
             Ok(format!("Removed {count} Rockbox files."))
         }
+        RockboxJob::Bootloader => {
+            bootloader::install(&agent, &firmware, drive, progress)?;
+            Ok(UNPLUG_TEXT.into())
+        }
+        RockboxJob::RestoreStock => {
+            bootloader::restore_stock(&agent, &firmware, drive, progress)?;
+            Ok(RESTORE_TEXT.into())
+        }
+        RockboxJob::FirstInstall => first_install(
+            || {
+                let (_, build) = resolve()?;
+                rockbox::install_build(&agent, work, drive, &build, progress).map(drop)
+            },
+            || bootloader::install(&agent, &firmware, drive, progress),
+        ),
         RockboxJob::Autoupdate(on) => {
             rockbox::set_database_autoupdate(drive, *on)?;
             let state = if *on { "on" } else { "off" };
@@ -2263,6 +2362,17 @@ fn run_rockbox(
 // Updates ------------------------------------------------------------------
 
 /// Records the check and says whether it should run. `force` skips the daily limit.
+/// The build goes on first, and the bootloader file only after it succeeded,
+/// so the player never flashes a bootloader with no Rockbox behind it.
+fn first_install(
+    build: impl FnOnce() -> Result<(), String>,
+    bootloader: impl FnOnce() -> Result<(), String>,
+) -> Result<String, String> {
+    build()?;
+    bootloader()?;
+    Ok(UNPLUG_TEXT.into())
+}
+
 fn record_check(state: &mut State, key: &str, now: u64, force: bool) -> bool {
     if !force && !state.due(key, now) {
         return false;
@@ -2597,6 +2707,86 @@ mod tests {
         assert!(!core.rockbox_busy);
         core.start_rockbox();
         assert!(core.rockbox_queue.is_empty() && core.rockbox_busy);
+    }
+
+    #[test]
+    fn first_install_writes_the_build_before_the_bootloader() {
+        let order = std::cell::RefCell::new(Vec::new());
+        let text = first_install(
+            || Ok(order.borrow_mut().push("build")),
+            || Ok(order.borrow_mut().push("bootloader")),
+        )
+        .unwrap();
+        assert_eq!(*order.borrow(), ["build", "bootloader"]);
+        assert_eq!(text, UNPLUG_TEXT);
+
+        let order = std::cell::RefCell::new(Vec::new());
+        let result = first_install(
+            || Err("no network".into()),
+            || Ok(order.borrow_mut().push("bootloader")),
+        );
+        assert!(result.is_err() && order.borrow().is_empty());
+    }
+
+    #[test]
+    fn bootloader_jobs_wait_in_the_rockbox_queue_and_need_the_player() {
+        let mut rig = rig();
+        let core = &mut rig.core;
+        for job in [RockboxJob::Bootloader, RockboxJob::RestoreStock] {
+            core.handle(Msg::RockboxQueue(job));
+        }
+        core.rockbox_busy = true;
+        core.start_rockbox();
+        assert_eq!(core.rockbox_queue.len(), 2, "queued behind a running job");
+        core.rockbox_busy = false;
+        core.start_rockbox();
+        assert_eq!(core.rockbox_queue.len(), 1);
+        assert!(!core.rockbox_busy, "no drive, so nothing started");
+        let events = rig.events.lock().unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            UiEvent::RockboxStatus { busy: false, text } if text.contains("not connected")
+        )));
+    }
+
+    #[test]
+    fn the_player_is_ejected_after_a_bootloader_write_and_flash_ends_on_return() {
+        let mut rig = rig();
+        let core = &mut rig.core;
+        core.internal = Some(volume("internal"));
+        core.ejector = Some(Arc::new(|_| Ok(())));
+        core.rockbox_busy = true;
+        core.handle(Msg::RockboxDone {
+            job: RockboxJob::Bootloader,
+            result: Ok(UNPLUG_TEXT.into()),
+        });
+        assert!(core.rockbox_busy, "busy until the eject is over");
+        loop {
+            let msg = rig.rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            if matches!(msg, Msg::InternalEjected { .. }) {
+                rig.core.handle(msg);
+                break;
+            }
+        }
+        let core = &mut rig.core;
+        assert!(!core.rockbox_busy && core.flash_pending);
+        {
+            let events = rig.events.lock().unwrap();
+            assert!(events.contains(&UiEvent::FlashPending(true)));
+            assert!(events.iter().any(|e| matches!(
+                e,
+                UiEvent::RockboxStatus { busy: false, text } if text == UNPLUG_TEXT
+            )));
+        }
+        core.on_internal(Some(volume("internal")));
+        assert!(core.flash_pending, "still plugged in");
+        core.on_internal(None);
+        core.on_internal(Some(volume("internal")));
+        assert!(!core.flash_pending);
+        assert_eq!(
+            rig.events.lock().unwrap().last(),
+            Some(&UiEvent::FlashPending(false))
+        );
     }
 
     #[test]

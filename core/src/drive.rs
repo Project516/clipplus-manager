@@ -5,8 +5,8 @@
 use crate::transfer;
 use rustix::fd::OwnedFd;
 use rustix::fs::{
-    AtFlags, CWD, Dir, FileType, Mode, OFlags, fstatvfs, fsync, mkdirat, openat, renameat, statat,
-    unlinkat,
+    Advice, AtFlags, CWD, Dir, FileType, Mode, OFlags, fadvise, fstatvfs, fsync, mkdirat, openat,
+    renameat, statat, unlinkat,
 };
 use rustix::io::Errno;
 use std::ffi::{OsStr, OsString};
@@ -266,8 +266,11 @@ impl Drive {
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )?;
+        let mut file = File::from(fd);
+        // Drop cached pages so a read after a write checks the device.
+        let _ = fadvise(&file, 0, None, Advice::DontNeed);
         let mut bytes = Vec::new();
-        File::from(fd).read_to_end(&mut bytes)?;
+        file.read_to_end(&mut bytes)?;
         Ok(bytes)
     }
 
@@ -296,6 +299,21 @@ impl Drive {
             let _ = unlinkat(&parent, &temp, AtFlags::empty());
         }
         result.map_err(fail)
+    }
+
+    /// Renames a file, replacing the target.
+    pub fn rename(&self, from: &RelPath, to: &RelPath) -> Result<(), String> {
+        self.check()?;
+        let (from_names, to_names) = (parts(&from.path), parts(&to.path));
+        let (Some((from_name, from_dir)), Some((to_name, to_dir))) =
+            (from_names.split_last(), to_names.split_last())
+        else {
+            return Err("empty path".into());
+        };
+        let fail = |e: Errno| format!("{}: {}", to.text(), text(e));
+        let from_parent = self.dir_of(from_dir, false).map_err(fail)?;
+        let to_parent = self.dir_of(to_dir, false).map_err(fail)?;
+        renameat(&from_parent, *from_name, &to_parent, *to_name).map_err(fail)
     }
 
     /// Returns false when the file was not there or could not be removed.
