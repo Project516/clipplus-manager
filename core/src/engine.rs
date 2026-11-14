@@ -1,21 +1,25 @@
 //! The coordinator. One thread owns all job state and reacts to messages from
 //! the UI and from worker threads. Nothing polls.
 
-use crate::card::{CardInfo, Udisks};
+use crate::card::{CardInfo, Udisks, Volumes};
+use crate::drive::Drive;
 use crate::musicbrainz::Recording;
 use crate::paths::{Config, Dirs, State, now_secs, read_json, read_json_checked, write_json};
+use crate::player::{self, Firmware, PlayerState};
 use crate::proc::{self, Cancel};
 use crate::queue::{self, Job, Stage};
+use crate::rockbox::{self, Build, Channel, Theme};
 use crate::slskd::{PeerFile, Slskd, Transfer, TransferStatus};
 use crate::tools::{self, Resolved, Staged, Tool};
 use crate::ytdlp::{self, Found, Line};
 use crate::{fixer, net, notify, selfupdate, transfer};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 const MAX_FINDING: usize = 2;
@@ -75,6 +79,22 @@ pub enum UiEvent {
     PeerResults(Vec<PeerFile>),
     PeerError(String),
     PeerSearching(bool),
+    /// The player, its drives and the firmware on it.
+    Player(PlayerState),
+    /// Progress or result text of a Rockbox action. `busy` is true while one runs.
+    RockboxStatus {
+        busy: bool,
+        text: String,
+    },
+    RockboxChannel(Channel),
+    /// The newest build of the chosen channel and whether the player lacks it.
+    RockboxLatest {
+        channel: Channel,
+        version: String,
+        update_available: bool,
+        can_roll_back: bool,
+    },
+    Themes(Vec<Theme>),
 }
 
 pub type Emit = Arc<dyn Fn(UiEvent) + Send + Sync>;
@@ -120,8 +140,29 @@ enum Msg {
         result: Result<PathBuf, String>,
     },
     Udisks(Udisks),
-    Card(Result<Option<CardInfo>, String>),
+    Card(Result<Volumes, String>),
     Mounted(Result<PathBuf, String>),
+    InternalMounted(Result<PathBuf, String>),
+    InternalEjected {
+        result: Result<(), String>,
+        text: String,
+    },
+    Mtp(bool),
+    Player(u64, PlayerState),
+    RockboxCheck,
+    RockboxChecked {
+        channel: Channel,
+        result: Result<Build, String>,
+    },
+    RockboxQueue(RockboxJob),
+    RockboxNote(String),
+    RockboxDone {
+        job: RockboxJob,
+        result: Result<String, String>,
+    },
+    RockboxThemes,
+    ThemesListed(Result<Vec<Theme>, String>),
+    SetRockboxChannel(Channel),
     Free(Option<u64>),
     CopyStarted(u64),
     Copied(Option<u64>),
@@ -139,9 +180,71 @@ enum Msg {
     Shutdown(Sender<()>),
 }
 
+#[derive(Default)]
+struct GateState {
+    // A count, because the next job can take its guard before the last one drops.
+    running: usize,
+    stopping: bool,
+}
+
+/// Shared by the coordinator, the Rockbox worker and `Engine::shutdown`, so
+/// shutdown can wait for a running install without the coordinator's help.
+#[derive(Clone, Default)]
+struct Gate(Arc<(Mutex<GateState>, Condvar)>);
+
+/// Held by the Rockbox worker. Dropping it, even after a panic or a failed
+/// thread spawn, releases its count.
+struct GateGuard(Gate);
+
+impl Gate {
+    fn state(&self) -> MutexGuard<'_, GateState> {
+        (self.0).0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// None once shutdown began, so no job starts after shutdown looked.
+    fn acquire(&self) -> Option<GateGuard> {
+        let mut state = self.state();
+        if state.stopping {
+            return None;
+        }
+        state.running += 1;
+        Some(GateGuard(self.clone()))
+    }
+
+    fn stop(&self) {
+        self.state().stopping = true;
+    }
+
+    fn wait_idle(&self) {
+        let mut state = self.state();
+        while state.running > 0 {
+            state = (self.0).1.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        self.0.state().running -= 1;
+        (self.0.0).1.notify_all();
+    }
+}
+
+type Spawner = fn(&str, Box<dyn FnOnce() + Send>) -> std::io::Result<()>;
+
+fn spawn_thread(name: &str, work: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(work)
+        .map(|_| ())
+}
+
+type Ejector = Arc<dyn Fn(&CardInfo) -> Result<(), String> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Engine {
     tx: Sender<Msg>,
+    gate: Gate,
 }
 
 impl Engine {
@@ -176,13 +279,71 @@ impl Engine {
     pub fn download_peer(&self, index: usize) {
         let _ = self.tx.send(Msg::DownloadPeer(index));
     }
-    /// Stops running downloads and saves the queue. Waits briefly for that.
+    /// Looks up the newest build of the chosen channel.
+    pub fn rockbox_check(&self) {
+        let _ = self.tx.send(Msg::RockboxCheck);
+    }
+    /// Installs the newest build of the chosen channel on the player.
+    pub fn rockbox_update(&self) {
+        self.queue_rockbox(RockboxJob::Update);
+    }
+    /// Installs the build that was on the host before the last update.
+    pub fn rockbox_rollback(&self) {
+        self.queue_rockbox(RockboxJob::Rollback);
+    }
+    pub fn rockbox_install_fonts(&self) {
+        self.queue_rockbox(RockboxJob::Fonts);
+    }
+    pub fn rockbox_install_voice(&self) {
+        self.queue_rockbox(RockboxJob::Voice);
+    }
+    /// Installs a theme by the id in a `Themes` event.
+    pub fn rockbox_install_theme(&self, id: &str) {
+        self.queue_rockbox(RockboxJob::Theme(id.into()));
+    }
+    /// Removes what the install log lists. `full` also removes settings and the database.
+    pub fn rockbox_uninstall(&self, full: bool) {
+        self.queue_rockbox(RockboxJob::Uninstall(full));
+    }
+    pub fn set_database_autoupdate(&self, on: bool) {
+        self.queue_rockbox(RockboxJob::Autoupdate(on));
+    }
+    /// Loads the theme list for the installed (or newest) build.
+    pub fn rockbox_themes(&self) {
+        let _ = self.tx.send(Msg::RockboxThemes);
+    }
+    pub fn set_rockbox_channel(&self, channel: Channel) {
+        let _ = self.tx.send(Msg::SetRockboxChannel(channel));
+    }
+    fn queue_rockbox(&self, job: RockboxJob) {
+        let _ = self.tx.send(Msg::RockboxQueue(job));
+    }
+    /// Stops running downloads and saves the queue. Waits briefly for that,
+    /// and as long as it takes for a running Rockbox install to finish.
     pub fn shutdown(&self) {
+        self.shutdown_within(Duration::from_secs(2));
+    }
+
+    fn shutdown_within(&self, ack_timeout: Duration) {
+        // No Rockbox job may start from here on, whatever the coordinator is doing.
+        self.gate.stop();
         let (ack, done) = channel();
         if self.tx.send(Msg::Shutdown(ack)).is_ok() {
-            let _ = done.recv_timeout(Duration::from_secs(2));
+            let _ = done.recv_timeout(ack_timeout);
         }
+        self.gate.wait_idle();
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RockboxJob {
+    Update,
+    Rollback,
+    Fonts,
+    Voice,
+    Theme(String),
+    Uninstall(bool),
+    Autoupdate(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +374,10 @@ struct Core {
     check_again: bool,
     cancels: HashMap<u64, Arc<Cancel>>,
     udisks: Option<Udisks>,
+    ejector: Option<Ejector>,
+    eject_deferred: bool,
+    gate: Gate,
+    spawner: Spawner,
     card: Option<CardInfo>,
     free: Option<u64>,
     note: Option<CardNote>,
@@ -234,6 +399,20 @@ struct Core {
     selected_recording: Option<Recording>,
     peer_results: Vec<PeerFile>,
     peer_generation: u64,
+    internal: Option<CardInfo>,
+    internal_mounting: bool,
+    internal_mount_failed: bool,
+    internal_ejected: Option<String>,
+    mtp: bool,
+    player_generation: u64,
+    player: Option<PlayerState>,
+    rockbox_checks: bool,
+    rockbox_checking: bool,
+    rockbox_busy: bool,
+    rockbox_queue: VecDeque<RockboxJob>,
+    latest: Option<Build>,
+    last_latest: Option<(Channel, String, bool, bool)>,
+    themes: Vec<Theme>,
 }
 
 /// What the coordinator listens to besides the UI.
@@ -256,10 +435,67 @@ pub fn start(dirs: Dirs, appimage: Option<PathBuf>, emit: Emit) -> Engine {
 
 pub fn start_with(dirs: Dirs, appimage: Option<PathBuf>, emit: Emit, options: Options) -> Engine {
     let (tx, rx) = channel();
-    let engine = Engine { tx: tx.clone() };
+    let gate = Gate::default();
+    let engine = Engine {
+        tx: tx.clone(),
+        gate: gate.clone(),
+    };
     let _ = dirs.create();
     tools::clean_stages(&dirs.tools);
 
+    let (core, resolved) = build_core(&dirs, &appimage, emit, &options, &tx, gate);
+
+    // Queued Soulseek downloads resume once slskd is connected.
+    if core
+        .jobs
+        .iter()
+        .any(|job| job.soulseek.is_some() && job.stage == Stage::Waiting)
+    {
+        let _ = tx.send(Msg::SoulseekConnect);
+    }
+
+    if options.card {
+        let mtp = tx.clone();
+        player::watch_mtp(move |on| {
+            let _ = mtp.send(Msg::Mtp(on));
+        });
+        let (connected, changed) = (tx.clone(), tx.clone());
+        Udisks::watch(
+            move |udisks| {
+                let _ = connected.send(Msg::Udisks(udisks));
+            },
+            move |card| {
+                let _ = changed.send(Msg::Card(card));
+            },
+        );
+    }
+    if options.updates {
+        spawn_updater(
+            tx,
+            dirs,
+            resolved,
+            appimage,
+            selfupdate::CURRENT.into(),
+            Vec::new(),
+            false,
+        );
+    }
+
+    std::thread::Builder::new()
+        .name("coordinator".into())
+        .spawn(move || core.run(rx))
+        .expect("spawn coordinator");
+    engine
+}
+
+fn build_core(
+    dirs: &Dirs,
+    appimage: &Option<PathBuf>,
+    emit: Emit,
+    options: &Options,
+    tx: &Sender<Msg>,
+    gate: Gate,
+) -> (Core, Resolved) {
     let bundled = options.bundled_tools.clone();
     let (saved_jobs, jobs_ok) = read_json_checked::<Vec<Job>>(&dirs.jobs_file);
     let mut jobs = queue::restore(saved_jobs);
@@ -301,6 +537,10 @@ pub fn start_with(dirs: Dirs, appimage: Option<PathBuf>, emit: Emit, options: Op
         check_again: false,
         cancels: HashMap::new(),
         udisks: None,
+        ejector: None,
+        eject_deferred: false,
+        gate,
+        spawner: spawn_thread,
         card: None,
         free: None,
         note: None,
@@ -322,46 +562,23 @@ pub fn start_with(dirs: Dirs, appimage: Option<PathBuf>, emit: Emit, options: Op
         selected_recording: None,
         peer_results: Vec::new(),
         peer_generation: 0,
+        internal: None,
+        internal_mounting: false,
+        internal_mount_failed: false,
+        internal_ejected: None,
+        mtp: false,
+        player_generation: 0,
+        player: None,
+        rockbox_checks: options.updates,
+        rockbox_checking: false,
+        rockbox_busy: false,
+        rockbox_queue: VecDeque::new(),
+        latest: None,
+        last_latest: None,
+        themes: Vec::new(),
         dirs: dirs.clone(),
     };
-
-    // Queued Soulseek downloads resume once slskd is connected.
-    if core
-        .jobs
-        .iter()
-        .any(|job| job.soulseek.is_some() && job.stage == Stage::Waiting)
-    {
-        let _ = tx.send(Msg::SoulseekConnect);
-    }
-
-    if options.card {
-        let (connected, changed) = (tx.clone(), tx.clone());
-        Udisks::watch(
-            move |udisks| {
-                let _ = connected.send(Msg::Udisks(udisks));
-            },
-            move |card| {
-                let _ = changed.send(Msg::Card(card));
-            },
-        );
-    }
-    if options.updates {
-        spawn_updater(
-            tx,
-            dirs,
-            resolved,
-            appimage,
-            selfupdate::CURRENT.into(),
-            Vec::new(),
-            false,
-        );
-    }
-
-    std::thread::Builder::new()
-        .name("coordinator".into())
-        .spawn(move || core.run(rx))
-        .expect("spawn coordinator");
-    engine
+    (core, resolved)
 }
 
 /// Job ids of `<id>-<generation>` folders in the downloads dir.
@@ -447,6 +664,9 @@ fn outbox_files(outbox: &Path) -> Vec<PathBuf> {
 impl Core {
     fn run(mut self, rx: Receiver<Msg>) {
         self.refresh_all();
+        if self.rockbox_checks {
+            self.rockbox_check();
+        }
         self.schedule();
         for msg in rx {
             self.handle(msg);
@@ -472,6 +692,7 @@ impl Core {
 
     fn refresh_all(&mut self) {
         (self.emit)(UiEvent::SponsorBlock(self.cfg.sponsorblock));
+        (self.emit)(UiEvent::RockboxChannel(self.cfg.rockbox_channel));
         self.show_all();
         self.refresh_waiting();
         self.refresh_card();
@@ -834,8 +1055,110 @@ impl Core {
                     self.show_all();
                 }
             }
-            Msg::Udisks(udisks) => self.udisks = Some(udisks),
-            Msg::Card(result) => self.on_card(result),
+            Msg::Udisks(udisks) => {
+                let eject = udisks.clone();
+                self.ejector = Some(Arc::new(move |card| eject.eject(card)));
+                self.udisks = Some(udisks);
+            }
+            Msg::Card(result) => self.on_volumes(result),
+            Msg::InternalMounted(result) => {
+                self.internal_mounting = false;
+                if let Err(e) = result {
+                    self.internal_mount_failed = true;
+                    self.rockbox_status(false, format!("Could not mount the player: {e}"));
+                }
+            }
+            Msg::InternalEjected { result, text } => {
+                let text = match result {
+                    Ok(()) => {
+                        self.internal_ejected = self.internal.as_ref().map(|c| c.block.clone());
+                        text
+                    }
+                    Err(e) => format!("{text} Could not eject the player: {e}"),
+                };
+                self.rockbox_status(false, text);
+                self.rockbox_idle();
+                self.refresh_player();
+            }
+            Msg::Mtp(on) => {
+                self.mtp = on;
+                self.refresh_player();
+            }
+            Msg::Player(generation, state) => {
+                if generation == self.player_generation && self.player.as_ref() != Some(&state) {
+                    self.player = Some(state.clone());
+                    (self.emit)(UiEvent::Player(state));
+                    self.emit_latest();
+                }
+            }
+            Msg::RockboxCheck => self.rockbox_check(),
+            Msg::RockboxChecked { channel, result } => {
+                self.rockbox_checking = false;
+                if channel != self.cfg.rockbox_channel {
+                    self.rockbox_check();
+                } else {
+                    match result {
+                        Ok(build) => {
+                            self.latest = Some(build);
+                            self.emit_latest();
+                        }
+                        Err(e) => self.rockbox_status(
+                            self.rockbox_busy,
+                            format!("Could not check for Rockbox updates: {e}"),
+                        ),
+                    }
+                }
+            }
+            Msg::RockboxQueue(job) => {
+                if self.transferring {
+                    self.rockbox_status(true, "Waiting for the song copy to finish".into());
+                }
+                self.rockbox_queue.push_back(job);
+            }
+            Msg::RockboxNote(text) => self.rockbox_status(true, text),
+            Msg::RockboxDone { job, result } => {
+                match result {
+                    // The player stays busy until the eject is over.
+                    Ok(text)
+                        if !self.stopping
+                            && matches!(job, RockboxJob::Update | RockboxJob::Rollback) =>
+                    {
+                        self.eject_internal(text);
+                    }
+                    Ok(text) => {
+                        self.rockbox_status(false, text);
+                        self.rockbox_idle();
+                    }
+                    Err(e) => {
+                        self.rockbox_status(false, e);
+                        self.rockbox_idle();
+                    }
+                }
+                self.refresh_player();
+            }
+            Msg::RockboxThemes => self.list_themes(),
+            Msg::ThemesListed(result) => match result {
+                Ok(themes) => {
+                    self.themes.clone_from(&themes);
+                    (self.emit)(UiEvent::Themes(themes));
+                }
+                Err(e) => self.rockbox_status(
+                    self.rockbox_busy,
+                    format!("Could not load the theme list: {e}"),
+                ),
+            },
+            Msg::SetRockboxChannel(channel) => {
+                if channel != self.cfg.rockbox_channel {
+                    self.cfg.rockbox_channel = channel;
+                    if self.config_writable {
+                        let _ = write_json(&self.dirs.config_file, &self.cfg);
+                    }
+                    self.latest = None;
+                    self.themes.clear();
+                    (self.emit)(UiEvent::RockboxChannel(channel));
+                    self.rockbox_check();
+                }
+            }
             Msg::Mounted(result) => {
                 self.mounting = false;
                 if let Err(e) = result {
@@ -929,8 +1252,12 @@ impl Core {
                 if let Some(client) = self.soulseek.take() {
                     client.stop();
                 }
+                self.rockbox_queue.clear();
                 self.dirty = true;
                 self.flush();
+                if self.rockbox_busy {
+                    self.rockbox_status(true, "Finishing the Rockbox install".into());
+                }
                 let _ = ack.send(());
             }
         }
@@ -1066,6 +1393,224 @@ impl Core {
         self.refresh_waiting();
     }
 
+    // Player and Rockbox ------------------------------------------------------
+
+    fn rockbox_status(&self, busy: bool, text: String) {
+        (self.emit)(UiEvent::RockboxStatus { busy, text });
+    }
+
+    fn on_volumes(&mut self, result: Result<Volumes, String>) {
+        match result {
+            Ok(volumes) => {
+                self.on_card(Ok(volumes.card));
+                self.on_internal(volumes.internal);
+            }
+            Err(e) => {
+                self.on_card(Err(e));
+                self.on_internal(None);
+            }
+        }
+    }
+
+    fn on_internal(&mut self, info: Option<CardInfo>) {
+        let previous = self.internal.take();
+        let appeared = info
+            .as_ref()
+            .is_some_and(|i| previous.as_ref().is_none_or(|p| p.block != i.block));
+        match &info {
+            None => {
+                self.internal_ejected = None;
+                self.internal_mount_failed = false;
+            }
+            Some(i) if appeared => {
+                self.internal_mount_failed = false;
+                if self.internal_ejected.as_ref() != Some(&i.block) {
+                    self.internal_ejected = None;
+                }
+            }
+            Some(_) => {}
+        }
+        if let Some(i) = &info
+            && i.mount.is_none()
+            && !self.internal_mounting
+            && !self.internal_mount_failed
+            && self.internal_ejected.as_ref() != Some(&i.block)
+            && let Some(udisks) = self.udisks.clone()
+        {
+            self.internal_mounting = true;
+            let (tx, card) = (self.tx.clone(), i.clone());
+            spawn("mount-player", move || {
+                let _ = tx.send(Msg::InternalMounted(udisks.mount(&card)));
+            });
+        }
+        self.internal = info;
+        self.refresh_player();
+        if appeared && self.rockbox_checks {
+            self.rockbox_check();
+        }
+    }
+
+    fn refresh_player(&mut self) {
+        self.player_generation += 1;
+        let generation = self.player_generation;
+        let volumes = Volumes {
+            card: self.card.clone(),
+            internal: self.internal.clone(),
+        };
+        let (mtp, tx) = (self.mtp, self.tx.clone());
+        spawn("player-state", move || {
+            let _ = tx.send(Msg::Player(generation, player::read_state(&volumes, mtp)));
+        });
+    }
+
+    fn installed_version(&self) -> Option<&str> {
+        match &self.player.as_ref()?.firmware {
+            Firmware::Rockbox { version } => Some(version),
+            _ => None,
+        }
+    }
+
+    fn emit_latest(&mut self) {
+        let Some(latest) = &self.latest else {
+            return;
+        };
+        let update_available = self
+            .installed_version()
+            .is_some_and(|v| rockbox::update_available(v, latest));
+        let key = (
+            latest.channel,
+            latest.version.clone(),
+            update_available,
+            rockbox::has_previous(&self.dirs.rockbox),
+        );
+        if self.last_latest.as_ref() != Some(&key) {
+            self.last_latest = Some(key.clone());
+            (self.emit)(UiEvent::RockboxLatest {
+                channel: key.0,
+                version: key.1,
+                update_available: key.2,
+                can_roll_back: key.3,
+            });
+        }
+    }
+
+    fn rockbox_check(&mut self) {
+        if self.rockbox_checking {
+            return;
+        }
+        self.rockbox_checking = true;
+        let (tx, dir, channel) = (
+            self.tx.clone(),
+            self.dirs.rockbox.clone(),
+            self.cfg.rockbox_channel,
+        );
+        spawn("rockbox-check", move || {
+            let result =
+                rockbox::fetch_build_info(&net::agent(), &dir).and_then(|info| info.build(channel));
+            let _ = tx.send(Msg::RockboxChecked { channel, result });
+        });
+    }
+
+    fn list_themes(&self) {
+        let version = self.installed_version().map(str::to_string);
+        let latest = self.latest.as_ref().map(|b| b.version.clone());
+        let (tx, dir, channel) = (
+            self.tx.clone(),
+            self.dirs.rockbox.clone(),
+            self.cfg.rockbox_channel,
+        );
+        spawn("rockbox-themes", move || {
+            let agent = net::agent();
+            let result = version
+                .or(latest)
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    rockbox::fetch_build_info(&agent, &dir)
+                        .and_then(|info| info.build(channel))
+                        .map(|build| build.version)
+                })
+                .and_then(|version| rockbox::list_themes(&agent, &version));
+            let _ = tx.send(Msg::ThemesListed(result));
+        });
+    }
+
+    /// Runs the next queued Rockbox job once no song copy or other job is running.
+    fn start_rockbox(&mut self) {
+        let blocked = self.rockbox_busy || self.transferring || self.ejecting;
+        if blocked || self.stopping || self.rockbox_queue.is_empty() {
+            return;
+        }
+        let Some(job) = self.rockbox_queue.pop_front() else {
+            return;
+        };
+        let root = self.internal.as_ref().and_then(|i| i.mount.clone());
+        let Some(root) = root else {
+            let text = if self.mtp {
+                "The player is in MTP mode. On the player, set Settings > System Settings > USB Mode to MSC."
+            } else {
+                "The player is not connected."
+            };
+            self.rockbox_status(false, text.into());
+            return;
+        };
+        let Some(guard) = self.gate.acquire() else {
+            return;
+        };
+        self.rockbox_busy = true;
+        self.rockbox_status(true, "Starting".into());
+        let tx = self.tx.clone();
+        let (dirs, channel, themes) = (
+            self.dirs.clone(),
+            self.cfg.rockbox_channel,
+            self.themes.clone(),
+        );
+        let work = move || {
+            let note = |text: &str| {
+                let _ = tx.send(Msg::RockboxNote(text.into()));
+            };
+            // The drive handle closes inside the closure, before the eject can start.
+            let run = || {
+                Drive::open(&root).and_then(|drive| {
+                    run_rockbox(&job, &dirs.rockbox, &drive, channel, &themes, &note)
+                })
+            };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+                .unwrap_or_else(|_| Err("The Rockbox job stopped unexpectedly".into()));
+            let _ = tx.send(Msg::RockboxDone { job, result });
+            drop(guard);
+        };
+        if let Err(e) = (self.spawner)("rockbox", Box::new(work)) {
+            // The closure and its gate guard are gone, so shutdown is not held up.
+            self.rockbox_busy = false;
+            self.rockbox_status(false, format!("Could not start the Rockbox job: {e}"));
+        }
+    }
+
+    /// The player is free for the next Rockbox job or song copy.
+    fn rockbox_idle(&mut self) {
+        self.rockbox_busy = false;
+    }
+
+    /// Unmounts the internal drive and powers it off, so the player can restart.
+    /// The job stays busy until `InternalEjected` arrives.
+    fn eject_internal(&mut self, done: String) {
+        let (Some(eject), Some(card)) = (self.ejector.clone(), self.internal.clone()) else {
+            self.rockbox_status(false, done);
+            self.rockbox_idle();
+            return;
+        };
+        self.rockbox_status(true, "Ejecting the player".into());
+        let tx = self.tx.clone();
+        let text = format!("{done} Safe to unplug. Restart the player to use it.");
+        spawn("eject-player", move || {
+            rustix::fs::sync();
+            let _ = tx.send(Msg::InternalEjected {
+                result: eject(&card),
+                text,
+            });
+        });
+    }
+
     // Card ---------------------------------------------------------------
 
     fn on_card(&mut self, result: Result<Option<CardInfo>, String>) {
@@ -1149,15 +1694,20 @@ impl Core {
         self.refresh_card();
     }
 
+    /// Waits while a Rockbox job holds the player.
     fn run_eject(&mut self) {
-        let (Some(udisks), Some(card)) = (self.udisks.clone(), self.card.clone()) else {
+        if self.rockbox_busy {
+            self.eject_deferred = true;
+            return;
+        }
+        let (Some(eject), Some(card)) = (self.ejector.clone(), self.card.clone()) else {
             return;
         };
         self.ejecting = true;
         let tx = self.tx.clone();
         spawn("eject", move || {
             rustix::fs::sync();
-            let _ = tx.send(Msg::Ejected(udisks.eject(&card)));
+            let _ = tx.send(Msg::Ejected(eject(&card)));
         });
     }
 
@@ -1194,6 +1744,7 @@ impl Core {
             self.run_eject();
         }
         self.refresh_waiting();
+        self.refresh_player();
     }
 
     fn start_transfer(&mut self, mount: &Path) {
@@ -1292,11 +1843,17 @@ impl Core {
         if self.staged.is_empty() {
             self.start_jobs();
         }
+        self.start_rockbox();
+        if self.eject_deferred && !self.rockbox_busy && self.rockbox_queue.is_empty() {
+            self.eject_deferred = false;
+            self.run_eject();
+        }
         let waiting = self.last_waiting.unwrap_or(0) > 0;
         let idle = !self.ejecting && !self.eject_after_copy && self.ejected_block.is_none();
         if (waiting || self.card_cleanup_pending)
             && idle
             && !self.transferring
+            && !self.rockbox_busy
             && !self
                 .jobs
                 .iter()
@@ -1647,6 +2204,62 @@ fn download(job: &DownloadJob, cancel: &Cancel, tx: &Sender<Msg>) -> Result<Path
     }
 }
 
+// Rockbox ------------------------------------------------------------------
+
+fn run_rockbox(
+    job: &RockboxJob,
+    work: &Path,
+    drive: &Drive,
+    channel: Channel,
+    themes: &[Theme],
+    progress: &dyn Fn(&str),
+) -> Result<String, String> {
+    let agent = net::agent();
+    let resolve = || {
+        let info = rockbox::fetch_build_info(&agent, work)?;
+        let build = info.build(channel)?;
+        Ok::<_, String>((info, build))
+    };
+    match job {
+        RockboxJob::Update => {
+            let (_, build) = resolve()?;
+            let version = rockbox::install_build(&agent, work, drive, &build, progress)?;
+            Ok(format!("Rockbox {version} is installed."))
+        }
+        RockboxJob::Rollback => {
+            let version = rockbox::install_previous(work, drive, progress)?;
+            Ok(format!("Rockbox {version} is installed."))
+        }
+        RockboxJob::Fonts => {
+            let (_, build) = resolve()?;
+            rockbox::install_fonts(&agent, work, drive, &build, progress)?;
+            Ok("Fonts are installed.".into())
+        }
+        RockboxJob::Voice => {
+            let (info, build) = resolve()?;
+            rockbox::install_voice(&agent, work, drive, &info, &build, "english", progress)?;
+            Ok("The voice file is installed.".into())
+        }
+        RockboxJob::Theme(id) => {
+            let theme = themes
+                .iter()
+                .find(|t| &t.id == id)
+                .ok_or("Open the theme list first")?;
+            rockbox::install_theme(&agent, work, drive, theme, progress)?;
+            Ok(format!("Theme {} is installed.", theme.name))
+        }
+        RockboxJob::Uninstall(full) => {
+            let count = rockbox::uninstall(drive, *full)?;
+            Ok(format!("Removed {count} Rockbox files."))
+        }
+        RockboxJob::Autoupdate(on) => {
+            rockbox::set_database_autoupdate(drive, *on)?;
+            let state = if *on { "on" } else { "off" };
+            Ok(format!("Database auto update is {state}."))
+        }
+    }
+}
+
 // Updates ------------------------------------------------------------------
 
 /// Records the check and says whether it should run. `force` skips the daily limit.
@@ -1785,6 +2398,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gate_waits_for_overlapping_jobs() {
+        let gate = Gate::default();
+        let first = gate.acquire().unwrap();
+        let second = gate.acquire().unwrap();
+        drop(first);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = gate.clone();
+        let handle = std::thread::spawn(move || {
+            waiter.wait_idle();
+            tx.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(second);
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn soulseek_cleanup_keeps_only_awaited_downloads() {
         let data = tempfile::tempdir().unwrap();
         for dir in ["downloads/kept", "downloads/stale", "incomplete/partial"] {
@@ -1884,5 +2515,208 @@ mod tests {
         ids.sort_unstable();
         assert_eq!(ids, [3, 7, 12]);
         assert!(download_folder_ids(&dir.path().join("missing")).is_empty());
+    }
+
+    struct Rig {
+        core: Core,
+        tx: Sender<Msg>,
+        rx: Receiver<Msg>,
+        events: Arc<std::sync::Mutex<Vec<UiEvent>>>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn rig() -> Rig {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(&dir.path().join("data"), &dir.path().join("config"));
+        dirs.create().unwrap();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = events.clone();
+        let emit: Emit = Arc::new(move |event| log.lock().unwrap().push(event));
+        let options = Options {
+            card: false,
+            updates: false,
+            bundled_tools: None,
+        };
+        let (tx, rx) = channel();
+        let (core, _) = build_core(&dirs, &None, emit, &options, &tx, Gate::default());
+        Rig {
+            core,
+            tx,
+            rx,
+            events,
+            _dir: dir,
+        }
+    }
+
+    fn volume(mount: &str) -> CardInfo {
+        CardInfo {
+            block: format!("/block{mount}"),
+            device: "/dev/sdb1".into(),
+            drive: None,
+            mount: Some(PathBuf::from(format!("/nonexistent/{mount}"))),
+        }
+    }
+
+    #[test]
+    fn the_player_stays_busy_until_the_update_eject_is_over() {
+        let mut rig = rig();
+        let core = &mut rig.core;
+        core.internal = Some(volume("internal"));
+        core.card = Some(volume("card"));
+        core.ejector = Some(Arc::new(|_| Ok(())));
+        core.rockbox_busy = true;
+        core.handle(Msg::RockboxDone {
+            job: RockboxJob::Update,
+            result: Ok("Rockbox is installed.".into()),
+        });
+        assert!(core.rockbox_busy, "the eject is still to come");
+
+        core.handle(Msg::RockboxQueue(RockboxJob::Fonts));
+        core.start_rockbox();
+        assert_eq!(
+            core.rockbox_queue.len(),
+            1,
+            "no job starts during the eject"
+        );
+
+        core.handle(Msg::Eject);
+        assert!(
+            !core.ejecting && core.eject_deferred,
+            "the card eject waits too"
+        );
+
+        loop {
+            let msg = rig.rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            if matches!(msg, Msg::InternalEjected { .. }) {
+                let core = &mut rig.core;
+                core.handle(msg);
+                break;
+            }
+        }
+        let core = &mut rig.core;
+        assert!(!core.rockbox_busy);
+        core.start_rockbox();
+        assert!(core.rockbox_queue.is_empty() && core.rockbox_busy);
+    }
+
+    #[test]
+    fn no_song_copy_starts_while_a_rockbox_job_holds_the_player() {
+        let mut rig = rig();
+        let core = &mut rig.core;
+        fs::write(core.dirs.outbox.join("a.mp3"), "x").unwrap();
+        core.last_waiting = Some(1);
+        core.card = Some(volume("card"));
+        core.rockbox_busy = true;
+        core.schedule();
+        assert!(!core.transferring);
+        core.rockbox_busy = false;
+        core.schedule();
+        assert!(core.transferring);
+    }
+
+    #[test]
+    fn the_coordinator_drops_queued_jobs_on_shutdown() {
+        let mut rig = rig();
+        let core = &mut rig.core;
+        core.rockbox_busy = true;
+        core.rockbox_queue.push_back(RockboxJob::Fonts);
+        let (ack, done) = channel();
+        core.handle(Msg::Shutdown(ack));
+        assert!(done.try_recv().is_ok());
+        assert!(core.rockbox_queue.is_empty(), "queued jobs do not start");
+        let says = rig.events.lock().unwrap().iter().any(|e| {
+            matches!(e, UiEvent::RockboxStatus { text, .. } if text == "Finishing the Rockbox install")
+        });
+        assert!(says);
+
+        let core = &mut rig.core;
+        core.handle(Msg::RockboxDone {
+            job: RockboxJob::Update,
+            result: Ok("Rockbox is installed.".into()),
+        });
+        assert!(!core.rockbox_busy);
+        assert!(core.ejector.is_none() && !core.eject_deferred);
+    }
+
+    fn within(limit: Duration, work: impl FnOnce() + Send + 'static) -> bool {
+        let (done, finished) = channel();
+        std::thread::spawn(move || {
+            work();
+            let _ = done.send(());
+        });
+        finished.recv_timeout(limit).is_ok()
+    }
+
+    #[test]
+    fn shutdown_waits_for_a_job_even_when_the_coordinator_answers_late() {
+        let gate = Gate::default();
+        let (tx, rx) = channel();
+        let engine = Engine {
+            tx,
+            gate: gate.clone(),
+        };
+        // A coordinator that takes far longer than the acknowledgement timeout.
+        std::thread::spawn(move || {
+            if let Ok(Msg::Shutdown(ack)) = rx.recv() {
+                std::thread::sleep(Duration::from_millis(300));
+                let _ = ack.send(());
+            }
+        });
+        let guard = gate.acquire().unwrap();
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        let waiter = std::thread::spawn(move || {
+            engine.shutdown_within(Duration::from_millis(20));
+            flag.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "shutdown left a running job"
+        );
+        assert!(
+            gate.acquire().is_none(),
+            "a new job started during shutdown"
+        );
+        drop(guard);
+        waiter.join().unwrap();
+        assert!(finished.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_worker_that_fails_to_start_does_not_hold_up_shutdown() {
+        let mut rig = rig();
+        let gate = rig.core.gate.clone();
+        let engine = Engine {
+            tx: rig.tx.clone(),
+            gate,
+        };
+        let core = &mut rig.core;
+        core.spawner = |_, _| Err(std::io::Error::other("no threads"));
+        core.internal = Some(volume("internal"));
+        core.rockbox_queue.push_back(RockboxJob::Fonts);
+        core.start_rockbox();
+        assert!(!core.rockbox_busy);
+        let reported = rig.events.lock().unwrap().iter().any(|e| {
+            matches!(e, UiEvent::RockboxStatus { busy: false, text } if text.contains("Could not start"))
+        });
+        assert!(reported);
+        // Nothing answers the shutdown message here, and the gate is clear.
+        assert!(within(Duration::from_secs(10), move || engine
+            .shutdown_within(Duration::from_millis(20))));
+    }
+
+    #[test]
+    fn a_panicking_worker_still_clears_the_gate() {
+        let gate = Gate::default();
+        let worker = {
+            let guard = gate.acquire().unwrap();
+            std::thread::spawn(move || {
+                let _guard = guard;
+                panic!("worker failed");
+            })
+        };
+        assert!(worker.join().is_err());
+        assert!(within(Duration::from_secs(10), move || gate.wait_idle()));
     }
 }

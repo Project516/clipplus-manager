@@ -1,6 +1,7 @@
 pub mod amsboot;
 pub mod bootloader;
 pub mod card;
+pub mod drive;
 pub mod engine;
 pub mod fixer;
 pub mod instance;
@@ -9,8 +10,10 @@ pub mod musicbrainz;
 pub mod net;
 pub mod notify;
 pub mod paths;
+pub mod player;
 pub mod proc;
 pub mod queue;
+pub mod rockbox;
 pub mod rules;
 pub mod selfupdate;
 pub mod slskd;
