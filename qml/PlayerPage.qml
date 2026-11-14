@@ -9,16 +9,16 @@ Kirigami.ScrollablePage {
 
     required property Backend backend
 
-    // Not backed yet. Sizes are bytes, -1 means unknown and hides the card.
-    property real internalTotal: -1
-    property real internalFree: -1
-    property real sdTotal: -1
-    property real sdFree: -1
+    // Sizes are bytes, -1 means unknown and hides the card.
+    readonly property real internalTotal: backend.internalTotal
+    readonly property real internalFree: backend.internalFree
+    readonly property real sdTotal: backend.sdTotal
+    readonly property real sdFree: backend.sdFree
     // "stock", "rockbox", or "" while unknown. Hides the firmware section.
-    property string firmware: ""
-    property string firmwareVersion: ""
-    property bool mtpMode: false
-    property bool bootloaderPending: false
+    readonly property string firmware: backend.firmwareKind
+    readonly property string firmwareVersion: backend.firmwareVersion
+    readonly property bool mtpMode: backend.playerMtp
+    readonly property bool bootloaderPending: backend.bootloaderPending
 
     readonly property CardState cardState: CardState {
         kind: page.backend.cardKind
@@ -88,6 +88,21 @@ Kirigami.ScrollablePage {
             showCloseButton: false
             type: Kirigami.MessageType.Warning
             text: "Unplug the player now. It flashes the bootloader and powers off by itself in about a minute. Do not touch it."
+        }
+
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            visible: page.backend.songsCopied && page.firmware === "rockbox" && !page.backend.databaseAutoUpdate
+            type: Kirigami.MessageType.Information
+            text: "Songs were copied. On the player, open Settings > General Settings > Database > Update Now so they show up."
+            showCloseButton: false
+            actions: [
+                Kirigami.Action {
+                    text: "Got it"
+                    icon.name: "dialog-ok"
+                    onTriggered: page.backend.dismissSongsCopied()
+                }
+            ]
         }
 
         CardMessage {

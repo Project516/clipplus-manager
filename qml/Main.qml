@@ -7,9 +7,6 @@ import dev.project516.clipplusmanager
 Kirigami.ApplicationWindow {
     id: root
 
-    // Turn on when the Rockbox backend exists.
-    property bool rockboxAvailable: false
-
     // Below this width the sidebar becomes a drawer.
     readonly property bool sidebarFits: width >= Kirigami.Units.gridUnit * 40
     property string section: ""
@@ -46,7 +43,7 @@ Kirigami.ApplicationWindow {
         section = key;
         const url = Qt.resolvedUrl(files[key]);
         const known = pool.pageForUrl(url);
-        const props = key === "rockbox" ? {} : {
+        const props = {
             "backend": app
         };
         if (known) {
@@ -93,6 +90,21 @@ Kirigami.ApplicationWindow {
         kind: app.cardKind
     }
 
+    readonly property bool headerError: app.cardKind === "error" || (app.rockboxFailed && app.playerConnected)
+    readonly property string headerState: {
+        if (app.flashPending)
+            return "Unplug now";
+        if (app.rockboxBusy)
+            return "Working";
+        if (root.headerError && app.cardKind !== "error")
+            return "Rockbox problem";
+        if (app.playerMtp)
+            return "MTP mode";
+        if (!card.away || !app.playerConnected)
+            return card.label;
+        return "Connected";
+    }
+
     Connections {
         target: Qt.application
         function onAboutToQuit() {
@@ -125,16 +137,16 @@ Kirigami.ApplicationWindow {
                 spacing: 0
                 Controls.Label {
                     Layout.fillWidth: true
-                    text: "Sansa Clip+"
+                    text: app.firmwareKind === "rockbox" ? "Sansa Clip+ (Rockbox)" : "Sansa Clip+"
                     font.bold: true
                     elide: Text.ElideRight
                 }
                 Controls.Label {
                     Layout.fillWidth: true
-                    text: card.label
+                    text: root.headerState
                     elide: Text.ElideRight
                     font: Kirigami.Theme.smallFont
-                    color: card.connected || app.cardKind === "safe" ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.disabledTextColor
+                    color: root.headerError ? Kirigami.Theme.negativeTextColor : app.playerMtp || app.flashPending ? Kirigami.Theme.neutralTextColor : card.connected || app.cardKind === "safe" || app.playerConnected ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.disabledTextColor
                 }
             }
         }
@@ -169,6 +181,7 @@ Kirigami.ApplicationWindow {
                 Layout.fillWidth: true
                 text: "Rockbox"
                 icon.name: "applications-development"
+                badgeText: app.rockboxUpdateAvailable ? "update" : ""
                 current: root.section === "rockbox"
                 onClicked: root.goTo("rockbox")
             }

@@ -7,21 +7,14 @@ import org.kde.kirigami as Kirigami
 RowLayout {
     id: flow
 
-    // 0 choose a build, 1 download, 2 copy, 3 unplug and flash, 4 turn on and check, 5 done
+    // 0 download, 1 copy, 2 unplug and flash, 3 turn on and check, 4 done
     property int step: 0
-    property string channel: "dev"
-    property string buildName
-    // 0 to 1, or -1 when the size is unknown
-    property real progress: -1
+    // The engine's status text for the running job
     property string detail
 
-    signal channelSelected(string channel)
-    signal startRequested
-    signal cancelRequested
-    signal checkRequested
     signal finished
 
-    readonly property var steps: ["Choose a build", "Download", "Copy to the player", "Unplug and flash", "Turn on and check"]
+    readonly property var steps: ["Download", "Copy to the player", "Unplug and flash", "Turn on and check"]
 
     spacing: Kirigami.Units.gridUnit * 2
 
@@ -71,55 +64,18 @@ RowLayout {
             spacing: Kirigami.Units.largeSpacing
             Kirigami.Heading {
                 level: 3
-                text: "Choose a build"
+                text: "Downloading Rockbox"
             }
-            RockboxChannelPicker {
+            Controls.ProgressBar {
                 Layout.fillWidth: true
-                channel: flow.channel
-                onChannelSelected: channel => flow.channelSelected(channel)
+                indeterminate: true
             }
             Controls.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                color: Kirigami.Theme.disabledTextColor
-                text: "Rockbox installs on the internal storage. Your music on the microSD card is not touched. You unplug the player once."
-            }
-            RowLayout {
-                spacing: Kirigami.Units.smallSpacing
-                Controls.Button {
-                    text: "Install Rockbox"
-                    icon.name: "download"
-                    highlighted: true
-                    onClicked: flow.startRequested()
-                }
-                Controls.Button {
-                    text: "Cancel"
-                    onClicked: flow.cancelRequested()
-                }
-            }
-        }
-
-        ColumnLayout {
-            spacing: Kirigami.Units.largeSpacing
-            Kirigami.Heading {
-                level: 3
-                text: "Downloading " + flow.buildName
-            }
-            Controls.ProgressBar {
-                Layout.fillWidth: true
-                from: 0
-                to: 1
-                indeterminate: flow.progress < 0
-                value: Math.max(0, flow.progress)
-            }
-            Controls.Label {
                 text: flow.detail
                 color: Kirigami.Theme.disabledTextColor
-            }
-            Controls.Button {
-                text: "Cancel"
-                icon.name: "dialog-cancel"
-                onClicked: flow.cancelRequested()
+                textFormat: Text.PlainText
             }
         }
 
@@ -131,16 +87,14 @@ RowLayout {
             }
             Controls.ProgressBar {
                 Layout.fillWidth: true
-                from: 0
-                to: 1
-                indeterminate: flow.progress < 0
-                value: Math.max(0, flow.progress)
+                indeterminate: true
             }
             Controls.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
                 text: flow.detail
                 color: Kirigami.Theme.disabledTextColor
+                textFormat: Text.PlainText
             }
             Kirigami.InlineMessage {
                 Layout.fillWidth: true
@@ -202,11 +156,6 @@ RowLayout {
                 Controls.Label {
                     text: "Waiting for the player"
                 }
-            }
-            Controls.Button {
-                text: "Check now"
-                icon.name: "view-refresh"
-                onClicked: flow.checkRequested()
             }
         }
 
