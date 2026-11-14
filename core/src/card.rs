@@ -202,6 +202,38 @@ pub fn find_volumes(
     }
 }
 
+/// Mounted filesystems on `drive` or on a drive with the same UDisks2
+/// `SiblingId`, which marks drives that share one physical device.
+fn sibling_filesystems(objects: &Objects, drive: &str) -> Vec<String> {
+    let sibling = |path: &str| {
+        objects
+            .iter()
+            .find(|(p, _)| p.as_str() == path)
+            .and_then(|(_, ifaces)| string(ifaces.get(DRIVE)?, "SiblingId"))
+            .filter(|id| !id.is_empty())
+    };
+    let wanted = sibling(drive);
+    let mut found: Vec<String> = objects
+        .iter()
+        .filter_map(|(path, ifaces)| {
+            let block = ifaces.get(BLOCK)?;
+            let filesystem = ifaces.get(FILESYSTEM)?;
+            let mounted = filesystem
+                .get("MountPoints")
+                .and_then(|v| Vec::<Vec<u8>>::try_from(v.try_clone().ok()?).ok())
+                .is_some_and(|points| !points.is_empty());
+            let owner = block
+                .get("Drive")
+                .and_then(|v| OwnedObjectPath::try_from(v.try_clone().ok()?).ok())?;
+            let same =
+                owner.as_str() == drive || (wanted.is_some() && sibling(owner.as_str()) == wanted);
+            (mounted && same).then(|| path.as_str().to_string())
+        })
+        .collect();
+    found.sort();
+    found
+}
+
 /// The text of a D-Bus error, without the wrapping.
 fn describe(error: zbus::Error) -> String {
     match error {
@@ -263,14 +295,28 @@ impl Udisks {
         }
     }
 
-    /// Unmounts the card and powers its drive off.
+    /// Unmounts every volume of the player, then powers it off. UDisks2 refuses
+    /// to power off a drive while a sibling drive on the same USB device (the
+    /// internal storage and the microSD slot) still has a mounted filesystem.
     pub fn eject(&self, card: &CardInfo) -> Result<(), String> {
         let options = || HashMap::<&str, Value>::new();
-        let filesystem = self.proxy(&card.block, FILESYSTEM)?;
-        if let Err(e) = filesystem.call::<_, _, ()>("Unmount", &(options(),)) {
-            let text = describe(e);
-            if !text.contains("not mounted") && !text.contains("NotMounted") {
-                return Err(text);
+        let manager = self.proxy(ROOT, "org.freedesktop.DBus.ObjectManager")?;
+        let objects: Objects = manager.call("GetManagedObjects", &()).map_err(describe)?;
+        let mut blocks = vec![card.block.clone()];
+        if let Some(drive) = &card.drive {
+            for block in sibling_filesystems(&objects, drive) {
+                if !blocks.contains(&block) {
+                    blocks.push(block);
+                }
+            }
+        }
+        for block in &blocks {
+            let filesystem = self.proxy(block, FILESYSTEM)?;
+            if let Err(e) = filesystem.call::<_, _, ()>("Unmount", &(options(),)) {
+                let text = describe(e);
+                if !text.contains("not mounted") && !text.contains("NotMounted") {
+                    return Err(text);
+                }
             }
         }
         if let Some(drive) = &card.drive {
@@ -413,6 +459,30 @@ mod tests {
             .into_iter()
             .map(|(path, ifaces)| (OwnedObjectPath::try_from(path).unwrap(), ifaces))
             .collect()
+    }
+
+    fn drive_with_sibling(id: &str) -> HashMap<String, Properties> {
+        let mut drive = Properties::new();
+        drive.insert("SiblingId".into(), value(id));
+        HashMap::from([(DRIVE.to_string(), drive)])
+    }
+
+    #[test]
+    fn ejects_every_mounted_volume_of_the_same_player() {
+        let all = objects(vec![
+            ("/d/internal", drive_with_sibling("/sys/usb1/1-2")),
+            ("/d/slot", drive_with_sibling("/sys/usb1/1-2")),
+            ("/d/other", drive_with_sibling("/sys/usb1/1-3")),
+            ("/o/sda", object("", "vfat", Some("/m/a"), "/d/internal")),
+            ("/o/sdb1", object("SANSA", "vfat", Some("/m/b"), "/d/slot")),
+            ("/o/sdc1", object("STICK", "vfat", Some("/m/c"), "/d/other")),
+            ("/o/sdb2", object("X", "vfat", None, "/d/slot")),
+        ]);
+        assert_eq!(
+            sibling_filesystems(&all, "/d/internal"),
+            ["/o/sda", "/o/sdb1"]
+        );
+        assert_eq!(sibling_filesystems(&all, "/d/other"), ["/o/sdc1"]);
     }
 
     #[test]

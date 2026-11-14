@@ -679,10 +679,13 @@ pub fn format_free(bytes: u64) -> String {
         (bytes as f64 / 1e12, "TB")
     } else if bytes >= 1_000_000_000 {
         (bytes as f64 / 1e9, "GB")
-    } else {
+    } else if bytes >= 1_000_000 {
         (bytes as f64 / 1e6, "MB")
+    } else {
+        // Theme archives are a few KB.
+        (bytes as f64 / 1e3, "KB")
     };
-    if value >= 100.0 || unit == "MB" {
+    if value >= 100.0 || unit == "MB" || unit == "KB" {
         format!("{value:.0} {unit}")
     } else {
         format!("{value:.1} {unit}")
@@ -1126,12 +1129,20 @@ impl Core {
                             self.flash_pending = true;
                             self.flash_gone = false;
                             (self.emit)(UiEvent::FlashPending(true));
+                            text
+                        } else {
+                            format!("{text} Safe to unplug. Restart the player to use it.")
                         }
-                        text
+                    }
+                    Err(e) if flash => {
+                        (self.emit)(UiEvent::RockboxFailed(true));
+                        format!(
+                            "The firmware file is on the player, but it could not be ejected, so do not unplug it yet. Press Eject player and wait for Safe to unplug. {e}"
+                        )
                     }
                     Err(e) => {
                         (self.emit)(UiEvent::RockboxFailed(true));
-                        format!("{text} Could not eject the player: {e}")
+                        format!("{text} Could not eject the player, so do not unplug it yet: {e}")
                     }
                 };
                 self.rockbox_status(false, text);
@@ -1679,16 +1690,11 @@ impl Core {
         };
         self.rockbox_status(true, "Ejecting the player".into());
         let tx = self.tx.clone();
-        let text = if flash {
-            done
-        } else {
-            format!("{done} Safe to unplug. Restart the player to use it.")
-        };
         spawn("eject-player", move || {
             rustix::fs::sync();
             let _ = tx.send(Msg::InternalEjected {
                 result: eject(&card),
-                text,
+                text: done,
                 flash,
             });
         });
@@ -2588,6 +2594,7 @@ mod tests {
         assert_eq!(format_free(9_540_000_000), "9.5 GB");
         assert_eq!(format_free(2_100_000_000_000), "2.1 TB");
         assert_eq!(format_free(512_000_000), "512 MB");
+        assert_eq!(format_free(4116), "4 KB");
     }
 
     #[test]
