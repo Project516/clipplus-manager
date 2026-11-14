@@ -13,6 +13,10 @@ const key = $('#key');
 const save = $('#save');
 const meter = $('#meter');
 
+$('#settings-link').addEventListener('click', () => {
+  $('#settings').open = true;
+});
+
 // fraction: undefined hides the bar, null shows it busy, 0 to 1 fills it.
 // Messages the user must act on show in full; song titles are clamped.
 function screen(title, detail = '', fraction, message = false) {
