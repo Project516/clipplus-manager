@@ -531,7 +531,7 @@ pub fn album_candidates(files: Vec<PeerFile>) -> Vec<PeerFile> {
 }
 
 fn parse_directory(value: &Value, username: &str, directory: &str) -> Vec<PeerFile> {
-    let separator = if directory.contains('\\') { '\\' } else { '/' };
+    let separator = if directory.contains('/') { '/' } else { '\\' };
     value
         .as_array()
         .into_iter()
@@ -594,6 +594,12 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].filename, "Artist\\Album\\01.flac");
         assert_eq!(files[1].username, "peer");
+        let root = parse_directory(
+            &json!([{ "name": "Album", "files": [{ "filename": "01.flac", "size": 100 }] }]),
+            "peer",
+            "Album",
+        );
+        assert_eq!(root[0].filename, "Album\\01.flac");
     }
 
     #[test]

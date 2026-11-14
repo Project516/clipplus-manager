@@ -133,7 +133,7 @@ enum Msg {
     SearchAlbums(String),
     CancelAlbumSearch,
     AlbumFound(u64, Result<Vec<PeerFile>, String>),
-    DownloadAlbum(usize),
+    DownloadAlbum(usize, bool),
     AlbumFiles(u64, Result<Vec<PeerFile>, String>),
     PeersFound(u64, Result<Vec<PeerFile>, String>),
     DownloadPeer(usize),
@@ -310,7 +310,10 @@ impl Engine {
         let _ = self.tx.send(Msg::CancelAlbumSearch);
     }
     pub fn download_album(&self, index: usize) {
-        let _ = self.tx.send(Msg::DownloadAlbum(index));
+        let _ = self.tx.send(Msg::DownloadAlbum(index, false));
+    }
+    pub fn download_peer_album(&self, index: usize) {
+        let _ = self.tx.send(Msg::DownloadAlbum(index, true));
     }
     pub fn download_peer(&self, index: usize) {
         let _ = self.tx.send(Msg::DownloadPeer(index));
@@ -990,6 +993,7 @@ impl Core {
                     .is_some_and(|current| Arc::ptr_eq(current, &client))
                 {
                     self.soulseek = None;
+                    self.album_browsing = false;
                     self.peer_generation += 1;
                     (self.emit)(UiEvent::PeerSearching(false));
                     (self.emit)(UiEvent::PeerError(
@@ -1037,13 +1041,25 @@ impl Core {
                 }
             }
             Msg::AlbumFound(..) => {}
-            Msg::DownloadAlbum(index) => {
+            Msg::DownloadAlbum(index, from_file) => {
                 if self.album_browsing {
                     return;
                 }
                 if let (Some(folder), Some(client)) =
                     (self.peer_results.get(index).cloned(), self.soulseek.clone())
                 {
+                    let folder = if from_file {
+                        let Some(folder) = crate::slskd::album_candidates(vec![folder])
+                            .into_iter()
+                            .next()
+                        else {
+                            (self.emit)(UiEvent::PeerError("This file has no album folder".into()));
+                            return;
+                        };
+                        folder
+                    } else {
+                        folder
+                    };
                     let generation = self.peer_generation;
                     self.album_browsing = true;
                     (self.emit)(UiEvent::PeerError(String::new()));

@@ -18,8 +18,7 @@ Kirigami.Page {
     signal downloadStarted
 
     function goBack() {
-        if (albumMode)
-            backend.cancelAlbumSearch();
+        backend.cancelAlbumSearch();
         step = 0;
     }
 
@@ -287,6 +286,13 @@ Kirigami.Page {
                 }
                 Item {
                     Layout.fillWidth: true
+                }
+                Controls.Button {
+                    visible: !page.albumMode
+                    text: "Download full album"
+                    icon.name: "download"
+                    enabled: !page.backend.peerSearching && files.currentIndex >= 0
+                    onClicked: page.backend.downloadPeerAlbum(files.currentIndex)
                 }
                 Controls.Button {
                     text: page.albumMode ? "Download album" : "Download"

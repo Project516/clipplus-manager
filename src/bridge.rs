@@ -154,6 +154,9 @@ pub mod qobject {
         fn download_album(self: &Backend, index: i32);
 
         #[qinvokable]
+        fn download_peer_album(self: &Backend, index: i32);
+
+        #[qinvokable]
         fn download_peer(self: &Backend, index: i32);
 
         #[qinvokable]
@@ -621,6 +624,12 @@ impl qobject::Backend {
     fn download_album(&self, index: i32) {
         if let (Some(engine), Ok(index)) = (self.engine(), usize::try_from(index)) {
             engine.download_album(index);
+        }
+    }
+
+    fn download_peer_album(&self, index: i32) {
+        if let (Some(engine), Ok(index)) = (self.engine(), usize::try_from(index)) {
+            engine.download_peer_album(index);
         }
     }
 
