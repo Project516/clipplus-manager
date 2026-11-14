@@ -7,7 +7,7 @@ Kirigami.InlineMessage {
 
     required property Backend backend
 
-    visible: backend.cardKind !== "none"
+    visible: backend.cardKind !== "" && backend.cardKind !== "none"
     showCloseButton: false
     text: backend.cardText
     type: {
