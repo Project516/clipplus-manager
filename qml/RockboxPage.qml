@@ -7,7 +7,7 @@ Kirigami.ScrollablePage {
     id: page
 
     // False until a Rockbox backend exists. Shows the placeholder only.
-    required property bool available
+    readonly property bool available: applicationWindow().rockboxAvailable
 
     // Inputs for the Rockbox backend, not wired yet.
     property bool playerReady: false

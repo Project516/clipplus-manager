@@ -13,13 +13,30 @@ Kirigami.ApplicationWindow {
     // Below this width the sidebar becomes a drawer.
     readonly property bool sidebarFits: width >= Kirigami.Units.gridUnit * 40
     property string section: ""
-    readonly property var factories: ({
-            "player": playerPage,
-            "downloads": downloadsPage,
-            "find": findPage,
-            "rockbox": rockboxPage,
-            "settings": settingsPage
+    // Pages load on first visit, then the pool keeps them alive.
+    readonly property var files: ({
+            "player": "PlayerPage.qml",
+            "downloads": "DownloadsPage.qml",
+            "find": "FindMusicPage.qml",
+            "rockbox": "RockboxPage.qml",
+            "settings": "SettingsPage.qml"
         })
+
+    Kirigami.PagePool {
+        id: pool
+        cachePages: true
+    }
+
+    function wire(key, page) {
+        if (key === "player") {
+            page.openDownloads.connect(() => goTo("downloads"));
+            page.openRockbox.connect(() => goTo("rockbox"));
+        } else if (key === "downloads") {
+            page.openFindMusic.connect(() => goTo("find"));
+        } else if (key === "find") {
+            page.downloadStarted.connect(() => goTo("downloads"));
+        }
+    }
 
     function goTo(key) {
         if (drawer.modal)
@@ -27,11 +44,26 @@ Kirigami.ApplicationWindow {
         if (key === section)
             return;
         section = key;
-        // Replacing destroys the old page, so each visit starts fresh.
+        const url = Qt.resolvedUrl(files[key]);
+        const known = pool.pageForUrl(url);
+        const props = key === "rockbox" ? {} : {
+            "backend": app
+        };
+        if (known) {
+            showPage(known);
+        } else {
+            pool.loadPageWithProperties(url, props, item => {
+                wire(key, item);
+                showPage(item);
+            });
+        }
+    }
+
+    function showPage(page) {
         if (pageStack.depth > 0)
-            pageStack.replace(factories[key]);
+            pageStack.replace(page);
         else
-            pageStack.push(factories[key]);
+            pageStack.push(page);
     }
 
     title: "ClipPlus Manager"
@@ -164,41 +196,6 @@ Kirigami.ApplicationWindow {
                 enabled: app.cardCanEject
                 onClicked: app.eject()
             }
-        }
-    }
-
-    Component {
-        id: playerPage
-        PlayerPage {
-            backend: app
-            onOpenDownloads: root.goTo("downloads")
-            onOpenRockbox: root.goTo("rockbox")
-        }
-    }
-    Component {
-        id: downloadsPage
-        DownloadsPage {
-            backend: app
-            onOpenFindMusic: root.goTo("find")
-        }
-    }
-    Component {
-        id: findPage
-        FindMusicPage {
-            backend: app
-            onDownloadStarted: root.goTo("downloads")
-        }
-    }
-    Component {
-        id: rockboxPage
-        RockboxPage {
-            available: root.rockboxAvailable
-        }
-    }
-    Component {
-        id: settingsPage
-        SettingsPage {
-            backend: app
         }
     }
 

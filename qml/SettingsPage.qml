@@ -54,6 +54,7 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
                 // Set on change, since the close button clears `visible`.
                 visible: false
+                Component.onCompleted: visible = page.backend.updateNote !== ""
                 showCloseButton: !page.backend.checkingUpdates
                 type: Kirigami.MessageType.Information
                 text: page.backend.updateNote

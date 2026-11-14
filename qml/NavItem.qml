@@ -8,7 +8,10 @@ Controls.ItemDelegate {
     property string badgeText: ""
     property bool current: false
 
+    focusPolicy: Qt.StrongFocus
     highlighted: current
+    Keys.onReturnPressed: clicked()
+    Keys.onEnterPressed: clicked()
     rightPadding: badge.visible ? badge.width + Kirigami.Units.largeSpacing * 2 : padding
     Accessible.name: badgeText === "" ? text : text + ", " + badgeText
 
