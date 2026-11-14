@@ -25,7 +25,7 @@ The app updates itself once a day. After an update it asks you to restart.
 
 - Linux x86_64 with a Plasma 6 desktop. The AppImage links the system Qt and Kirigami, so it needs:
   - Qt 6.11 or newer (the release is built on Fedora 45)
-  - Kirigami 6 and `qqc2-desktop-style` from KDE Frameworks 6
+  - Kirigami 6.26 or newer and `qqc2-desktop-style` from KDE Frameworks 6
 - UDisks2 on the system bus (any desktop that mounts removable media has it).
 - Internet access for downloads and tool updates.
 
