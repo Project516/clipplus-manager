@@ -11,6 +11,7 @@ Controls.ItemDelegate {
     property string size
     property url preview
     property bool installed: false
+    property bool busy: false
 
     signal installRequested
 
@@ -27,6 +28,8 @@ Controls.ItemDelegate {
             Layout.preferredHeight: Kirigami.Units.gridUnit * 3.5
             source: delegate.preview
             fillMode: Image.PreserveAspectFit
+            sourceSize.width: Kirigami.Units.gridUnit * 14
+            sourceSize.height: Kirigami.Units.gridUnit * 7
             smooth: false
             asynchronous: true
             Accessible.name: "Preview of " + delegate.name
@@ -59,6 +62,7 @@ Controls.ItemDelegate {
         }
         Controls.Button {
             visible: !delegate.installed
+            enabled: !delegate.busy
             text: "Install"
             icon.name: "download"
             onClicked: delegate.installRequested()

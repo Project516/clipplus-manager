@@ -7,21 +7,17 @@ import org.kde.kirigami as Kirigami
 RowLayout {
     id: flow
 
-    // 0 choose a build, 1 download, 2 copy, 3 unplug and flash, 4 turn on and check, 5 done
+    // 0 download, 1 copy, 2 unplug and flash, 3 turn on and check, 4 done
     property int step: 0
-    property string channel: "dev"
-    property string buildName
-    // 0 to 1, or -1 when the size is unknown
-    property real progress: -1
+    // The engine's status text for the running job
     property string detail
+    // False while the firmware file waits on a player that is not ejected yet
+    property bool ejected: true
 
-    signal channelSelected(string channel)
-    signal startRequested
-    signal cancelRequested
-    signal checkRequested
+    signal ejectRequested
     signal finished
 
-    readonly property var steps: ["Choose a build", "Download", "Copy to the player", "Unplug and flash", "Turn on and check"]
+    readonly property var steps: ["Download", "Copy to the player", "Unplug and flash", "Turn on and check"]
 
     spacing: Kirigami.Units.gridUnit * 2
 
@@ -71,55 +67,18 @@ RowLayout {
             spacing: Kirigami.Units.largeSpacing
             Kirigami.Heading {
                 level: 3
-                text: "Choose a build"
+                text: "Downloading Rockbox"
             }
-            RockboxChannelPicker {
+            Controls.ProgressBar {
                 Layout.fillWidth: true
-                channel: flow.channel
-                onChannelSelected: channel => flow.channelSelected(channel)
+                indeterminate: true
             }
             Controls.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                color: Kirigami.Theme.disabledTextColor
-                text: "Rockbox installs on the internal storage. Your music on the microSD card is not touched. You unplug the player once."
-            }
-            RowLayout {
-                spacing: Kirigami.Units.smallSpacing
-                Controls.Button {
-                    text: "Install Rockbox"
-                    icon.name: "download"
-                    highlighted: true
-                    onClicked: flow.startRequested()
-                }
-                Controls.Button {
-                    text: "Cancel"
-                    onClicked: flow.cancelRequested()
-                }
-            }
-        }
-
-        ColumnLayout {
-            spacing: Kirigami.Units.largeSpacing
-            Kirigami.Heading {
-                level: 3
-                text: "Downloading " + flow.buildName
-            }
-            Controls.ProgressBar {
-                Layout.fillWidth: true
-                from: 0
-                to: 1
-                indeterminate: flow.progress < 0
-                value: Math.max(0, flow.progress)
-            }
-            Controls.Label {
                 text: flow.detail
                 color: Kirigami.Theme.disabledTextColor
-            }
-            Controls.Button {
-                text: "Cancel"
-                icon.name: "dialog-cancel"
-                onClicked: flow.cancelRequested()
+                textFormat: Text.PlainText
             }
         }
 
@@ -131,16 +90,14 @@ RowLayout {
             }
             Controls.ProgressBar {
                 Layout.fillWidth: true
-                from: 0
-                to: 1
-                indeterminate: flow.progress < 0
-                value: Math.max(0, flow.progress)
+                indeterminate: true
             }
             Controls.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
                 text: flow.detail
                 color: Kirigami.Theme.disabledTextColor
+                textFormat: Text.PlainText
             }
             Kirigami.InlineMessage {
                 Layout.fillWidth: true
@@ -156,21 +113,37 @@ RowLayout {
             spacing: Kirigami.Units.largeSpacing
             Kirigami.InlineMessage {
                 Layout.fillWidth: true
-                visible: true
+                visible: !flow.ejected
+                showCloseButton: false
+                type: Kirigami.MessageType.Warning
+                text: "Eject the player, then unplug it so it can flash the bootloader."
+                actions: [
+                    Kirigami.Action {
+                        text: "Eject"
+                        icon.name: "media-eject"
+                        onTriggered: flow.ejectRequested()
+                    }
+                ]
+            }
+            Kirigami.InlineMessage {
+                Layout.fillWidth: true
+                visible: flow.ejected
                 showCloseButton: false
                 type: Kirigami.MessageType.Warning
                 text: "Unplug the player now. It flashes the bootloader and powers off by itself in about a minute. Do not touch it."
             }
             Kirigami.Heading {
                 level: 3
-                text: "Unplug the player now"
+                text: flow.ejected ? "Unplug the player now" : "Eject the player first"
             }
             Controls.Label {
                 Layout.fillWidth: true
+                visible: flow.ejected
                 wrapMode: Text.WordWrap
                 text: "1. Pull out the USB cable.\n2. The player shows an update screen and flashes the bootloader. Do not press any buttons.\n3. When it has powered off, hold the power button to turn it on."
             }
             RowLayout {
+                visible: flow.ejected
                 spacing: Kirigami.Units.smallSpacing
                 Controls.BusyIndicator {
                     implicitWidth: Kirigami.Units.iconSizes.smallMedium
@@ -203,11 +176,6 @@ RowLayout {
                     text: "Waiting for the player"
                 }
             }
-            Controls.Button {
-                text: "Check now"
-                icon.name: "view-refresh"
-                onClicked: flow.checkRequested()
-            }
         }
 
         ColumnLayout {
@@ -217,7 +185,7 @@ RowLayout {
                 visible: true
                 showCloseButton: false
                 type: Kirigami.MessageType.Positive
-                text: "Rockbox is installed."
+                text: "Rockbox is running on the player."
             }
             Controls.Button {
                 text: "Done"

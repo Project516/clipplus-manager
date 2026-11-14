@@ -1,11 +1,10 @@
 //! Installs the Rockbox bootloader on a Clip+ by writing a patched original
 //! firmware (`clppa.bin`) to the player. The player flashes it after unplug.
 
-use crate::{amsboot, net, transfer};
-use rustix::fs::{Advice, fadvise};
-use std::fs::{self, File, OpenOptions};
-use std::io::{Cursor, Read, Write};
-use std::os::unix::fs::MetadataExt;
+use crate::drive::{Drive, RelPath};
+use crate::{amsboot, net};
+use std::fs;
+use std::io::{Cursor, Read};
 use std::path::Path;
 use zip::ZipArchive;
 
@@ -13,6 +12,7 @@ const BOOTLOADER_URL: &str =
     "https://download.rockbox.org/bootloader/sandisk-sansa/clipplus/bootloader-clipplus.sansa";
 const BOOTLOADER_MD5: &str = "dbb6f832c8a911273be0b0455e8378d0";
 const OF_FILE: &str = "clppa.bin";
+const STAGING_FILE: &str = "clppa.bin.verify";
 const MAX_OF_SIZE: u64 = 32 << 20;
 const FREE_MARGIN: u64 = 1 << 20;
 
@@ -39,10 +39,9 @@ pub fn pending(internal_root: &Path) -> bool {
 pub fn install(
     agent: &ureq::Agent,
     cache: &Path,
-    internal_root: &Path,
+    drive: &Drive,
     progress: &dyn Fn(&str),
 ) -> Result<(), String> {
-    let device = mounted_device(internal_root)?;
     let of = stock_firmware(agent, cache, &STOCK, progress)?;
     progress("Downloading the Rockbox bootloader");
     let bootloader = cached(
@@ -54,19 +53,18 @@ pub fn install(
     )?;
     progress("Patching the firmware");
     let patched = amsboot::patch(&of, &bootloader)?;
-    write_to_player(internal_root, device, &patched, progress)
+    write_to_player(drive, &patched, progress)
 }
 
 /// Writes the unmodified original firmware, to go back from Rockbox.
 pub fn restore_stock(
     agent: &ureq::Agent,
     cache: &Path,
-    internal_root: &Path,
+    drive: &Drive,
     progress: &dyn Fn(&str),
 ) -> Result<(), String> {
-    let device = mounted_device(internal_root)?;
     let of = stock_firmware(agent, cache, &STOCK, progress)?;
-    write_to_player(internal_root, device, &of, progress)
+    write_to_player(drive, &of, progress)
 }
 
 fn stock_firmware(
@@ -139,78 +137,34 @@ fn cached(
     Ok(data)
 }
 
-/// The device id of a mounted root, so a write never lands on whatever is
-/// under the mount point after the player goes away.
-fn mounted_device(root: &Path) -> Result<u64, String> {
-    let dev = fs::metadata(root).map_err(|e| e.to_string())?.dev();
-    let parent = root.parent().unwrap_or(root);
-    if fs::metadata(parent).map(|m| m.dev()).ok() == Some(dev) {
-        return Err("The player's drive is not mounted".into());
-    }
-    Ok(dev)
-}
-
-fn check_device(root: &Path, device: u64) -> Result<(), String> {
-    match fs::metadata(root) {
-        Ok(m) if m.dev() == device => Ok(()),
-        _ => Err("The player's drive went away".into()),
-    }
-}
-
-fn write_to_player(
-    root: &Path,
-    device: u64,
-    data: &[u8],
-    progress: &dyn Fn(&str),
-) -> Result<(), String> {
-    check_device(root, device)?;
+fn write_to_player(drive: &Drive, data: &[u8], progress: &dyn Fn(&str)) -> Result<(), String> {
+    drive.check()?;
     let need = data.len() as u64 + FREE_MARGIN;
-    if transfer::free_space(root).is_some_and(|free| free < need) {
+    if drive.free_space().is_some_and(|free| free < need) {
         return Err("There is not enough free space on the player".into());
     }
     progress("Writing the firmware to the player");
-    let temp = root.join(format!(".{OF_FILE}.part"));
-    let target = root.join(OF_FILE);
-    let result = write_checked(&temp, data).and_then(|()| publish(root, device, &temp, &target));
-    if result.is_err() && check_device(root, device).is_ok() {
-        let _ = fs::remove_file(&temp);
-        let _ = File::open(root).and_then(|dir| dir.sync_all());
+    let (staging, target) = (RelPath::parse(STAGING_FILE)?, RelPath::parse(OF_FILE)?);
+    let result = write_checked(drive, &staging, data).and_then(|()| {
+        drive.rename(&staging, &target)?;
+        drive.sync_dir(Path::new("")).inspect_err(|_| {
+            // The rename may not survive, so the player must not find the file either.
+            let _ = drive.remove_file(&target);
+        })
+    });
+    if result.is_err() {
+        let _ = drive.remove_file(&staging);
+        let _ = drive.sync_dir(Path::new(""));
     }
     result
 }
 
-/// Writes `temp` and reads it back from the device before it gets its real name.
-fn write_checked(temp: &Path, data: &[u8]) -> Result<(), String> {
-    let _ = fs::remove_file(temp);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(temp)
-        .map_err(|e| e.to_string())?;
-    file.write_all(data).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
-    drop(file);
-
-    let mut written = File::open(temp).map_err(|e| e.to_string())?;
-    let _ = fadvise(&written, 0, None, Advice::DontNeed);
-    let mut back = Vec::with_capacity(data.len());
-    written.read_to_end(&mut back).map_err(|e| e.to_string())?;
+/// Writes `staging` and reads it back from the device before it gets its real name.
+fn write_checked(drive: &Drive, staging: &RelPath, data: &[u8]) -> Result<(), String> {
+    drive.write(staging, &mut &data[..])?;
+    let back = drive.read(staging).map_err(|e| e.to_string())?;
     if amsboot::md5_hex(&back) != amsboot::md5_hex(data) {
         return Err("The file on the player does not match".into());
-    }
-    Ok(())
-}
-
-fn publish(root: &Path, device: u64, temp: &Path, target: &Path) -> Result<(), String> {
-    check_device(root, device)?;
-    fs::rename(temp, target).map_err(|e| e.to_string())?;
-    if let Err(e) = File::open(root).and_then(|dir| dir.sync_all()) {
-        // Never leave a file the player would flash without a durable rename.
-        if check_device(root, device).is_ok() {
-            let _ = fs::remove_file(target);
-            let _ = File::open(root).and_then(|dir| dir.sync_all());
-        }
-        return Err(e.to_string());
     }
     Ok(())
 }
@@ -218,17 +172,16 @@ fn publish(root: &Path, device: u64, temp: &Path, target: &Path) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use zip::write::SimpleFileOptions;
 
-    fn dev(path: &Path) -> u64 {
-        fs::metadata(path).unwrap().dev()
-    }
-
     #[test]
-    fn refuses_a_changed_device() {
+    fn refuses_a_drive_that_went_away() {
         let dir = tempfile::tempdir().unwrap();
-        let err = write_to_player(dir.path(), dev(dir.path()) + 1, b"x", &|_| {}).unwrap_err();
-        assert!(err.contains("went away"));
+        let drive = Drive::for_test(dir.path());
+        drive.fail_after(0);
+        let err = write_to_player(&drive, b"x", &|_| {}).unwrap_err();
+        assert!(err.contains("unplugged"));
         assert!(!pending(dir.path()));
     }
 
@@ -237,7 +190,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("mnt");
         fs::create_dir(&sub).unwrap();
-        assert!(mounted_device(&sub).is_err());
+        assert!(Drive::open(&sub).is_err());
     }
 
     fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -252,20 +205,41 @@ mod tests {
     #[test]
     fn writes_and_detects_pending() {
         let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
         assert!(!pending(dir.path()));
-        write_to_player(dir.path(), dev(dir.path()), b"firmware", &|_| {}).unwrap();
+        write_to_player(&drive, b"firmware", &|_| {}).unwrap();
         assert!(pending(dir.path()));
         assert_eq!(fs::read(dir.path().join(OF_FILE)).unwrap(), b"firmware");
         let names: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
-        assert_eq!(names.len(), 1);
+        assert_eq!(names.len(), 1, "no staging or temp file is left");
+    }
+
+    #[test]
+    fn a_failed_flush_after_the_rename_removes_the_firmware_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
+        drive.fail_sync();
+        assert!(write_to_player(&drive, b"firmware", &|_| {}).is_err());
+        assert!(!pending(dir.path()));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
     fn replaces_an_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(OF_FILE), b"old").unwrap();
-        write_to_player(dir.path(), dev(dir.path()), b"new", &|_| {}).unwrap();
+        write_to_player(&Drive::for_test(dir.path()), b"new", &|_| {}).unwrap();
         assert_eq!(fs::read(dir.path().join(OF_FILE)).unwrap(), b"new");
+    }
+
+    #[test]
+    fn a_drive_lost_before_the_rename_keeps_the_old_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(OF_FILE), b"old").unwrap();
+        let drive = Drive::for_test(dir.path());
+        drive.fail_after(3);
+        assert!(write_to_player(&drive, b"new", &|_| {}).is_err());
+        assert_eq!(fs::read(dir.path().join(OF_FILE)).unwrap(), b"old");
     }
 
     #[test]

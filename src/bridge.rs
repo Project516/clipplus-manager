@@ -37,6 +37,29 @@ pub mod qobject {
         #[qproperty(QString, update_note)]
         #[qproperty(bool, checking_updates)]
         #[qproperty(bool, has_finished)]
+        #[qproperty(bool, player_connected)]
+        #[qproperty(bool, player_mtp)]
+        #[qproperty(f64, internal_total)]
+        #[qproperty(f64, internal_free)]
+        #[qproperty(f64, sd_total)]
+        #[qproperty(f64, sd_free)]
+        #[qproperty(QString, firmware_kind)]
+        #[qproperty(QString, firmware_version)]
+        #[qproperty(bool, bootloader_pending)]
+        #[qproperty(bool, flash_pending)]
+        #[qproperty(QString, flash_kind)]
+        #[qproperty(bool, rockbox_busy)]
+        #[qproperty(bool, rockbox_failed)]
+        #[qproperty(QString, rockbox_status)]
+        #[qproperty(QString, rockbox_phase)]
+        #[qproperty(QString, rockbox_channel)]
+        #[qproperty(QString, rockbox_latest)]
+        #[qproperty(bool, rockbox_update_available)]
+        #[qproperty(bool, rockbox_can_roll_back)]
+        #[qproperty(bool, database_auto_update)]
+        #[qproperty(bool, database_auto_update_known)]
+        #[qproperty(bool, songs_copied)]
+        #[qproperty(QString, theme_list)]
         #[qproperty(QString, search_results)]
         #[qproperty(QString, search_error)]
         #[qproperty(bool, searching)]
@@ -140,6 +163,51 @@ pub mod qobject {
         fn restart(self: Pin<&mut Backend>) -> bool;
 
         #[qinvokable]
+        fn rockbox_check(self: &Backend);
+
+        #[qinvokable]
+        fn rockbox_update(self: &Backend);
+
+        #[qinvokable]
+        fn rockbox_rollback(self: &Backend);
+
+        #[qinvokable]
+        fn rockbox_install_fonts(self: &Backend);
+
+        #[qinvokable]
+        fn rockbox_install_voice(self: &Backend);
+
+        #[qinvokable]
+        fn rockbox_install_theme(self: &Backend, id: &QString);
+
+        #[qinvokable]
+        fn rockbox_uninstall(self: &Backend, full: bool);
+
+        #[qinvokable]
+        fn rockbox_install_bootloader(self: &Backend);
+
+        #[qinvokable]
+        fn rockbox_restore_stock(self: &Backend);
+
+        #[qinvokable]
+        fn rockbox_install_first(self: &Backend);
+
+        #[qinvokable]
+        fn eject_player(self: &Backend);
+
+        #[qinvokable]
+        fn load_rockbox_themes(self: &Backend);
+
+        #[qinvokable]
+        fn choose_rockbox_channel(self: &Backend, channel: &QString);
+
+        #[qinvokable]
+        fn change_database_auto_update(self: Pin<&mut Backend>, on: bool);
+
+        #[qinvokable]
+        fn dismiss_songs_copied(self: Pin<&mut Backend>);
+
+        #[qinvokable]
         fn shutdown(self: &Backend);
     }
 
@@ -151,7 +219,9 @@ use crate::{INITIAL_LINKS, INSTANCE};
 use clipplus_manager_core::engine::{self, Emit, Engine, JobView, UiEvent};
 use clipplus_manager_core::instance::{Command, Instance};
 use clipplus_manager_core::paths::Dirs;
+use clipplus_manager_core::player::{Firmware, PlayerState};
 use clipplus_manager_core::queue::parse_links;
+use clipplus_manager_core::rockbox::{Channel, Theme};
 use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{
@@ -183,6 +253,29 @@ pub struct BackendRust {
     update_note: QString,
     checking_updates: bool,
     has_finished: bool,
+    player_connected: bool,
+    player_mtp: bool,
+    internal_total: f64,
+    internal_free: f64,
+    sd_total: f64,
+    sd_free: f64,
+    firmware_kind: QString,
+    firmware_version: QString,
+    bootloader_pending: bool,
+    flash_pending: bool,
+    flash_kind: QString,
+    rockbox_busy: bool,
+    rockbox_failed: bool,
+    rockbox_status: QString,
+    rockbox_phase: QString,
+    rockbox_channel: QString,
+    rockbox_latest: QString,
+    rockbox_update_available: bool,
+    rockbox_can_roll_back: bool,
+    database_auto_update: bool,
+    database_auto_update_known: bool,
+    songs_copied: bool,
+    theme_list: QString,
     search_results: QString,
     search_error: QString,
     searching: bool,
@@ -265,12 +358,69 @@ impl qobject::Backend {
             }
             UiEvent::PeerError(error) => self.set_peer_error(QString::from(&error)),
             UiEvent::PeerSearching(searching) => self.set_peer_searching(searching),
-            UiEvent::Player(_)
-            | UiEvent::RockboxStatus { .. }
-            | UiEvent::RockboxChannel(_)
-            | UiEvent::RockboxLatest { .. }
-            | UiEvent::Themes(_) => {}
+            UiEvent::Player(state) => self.set_player(&state),
+            UiEvent::RockboxStatus { busy, text } => {
+                if busy {
+                    // A new job clears the last failure, so the next one is a change.
+                    self.as_mut().set_rockbox_failed(false);
+                }
+                self.as_mut().set_rockbox_busy(busy);
+                self.set_rockbox_status(QString::from(&text));
+            }
+            UiEvent::RockboxChannel(channel) => {
+                let key = QString::from(channel_key(channel));
+                if *self.rockbox_channel() != key {
+                    // The old channel's build says nothing about the new one.
+                    self.as_mut().set_rockbox_latest(QString::default());
+                    self.as_mut().set_rockbox_update_available(false);
+                }
+                self.set_rockbox_channel(key);
+            }
+            UiEvent::RockboxLatest {
+                version,
+                update_available,
+                can_roll_back,
+                ..
+            } => {
+                self.as_mut().set_rockbox_latest(QString::from(&version));
+                self.as_mut().set_rockbox_update_available(update_available);
+                self.set_rockbox_can_roll_back(can_roll_back);
+            }
+            UiEvent::Themes(themes) => {
+                self.set_theme_list(QString::from(&themes_json(&themes)));
+            }
+            UiEvent::DatabaseAutoUpdate(value) => {
+                self.as_mut().set_database_auto_update(value == Some(true));
+                self.set_database_auto_update_known(value.is_some());
+            }
+            UiEvent::FlashPending(on) => self.set_flash_pending(on),
+            UiEvent::FlashKind(kind) => self.set_flash_kind(QString::from(kind)),
+            UiEvent::RockboxFailed(failed) => self.set_rockbox_failed(failed),
+            UiEvent::SongsCopied => self.set_songs_copied(true),
+            UiEvent::RockboxPhase(phase) => self.set_rockbox_phase(QString::from(phase)),
         }
+    }
+
+    fn set_player(mut self: Pin<&mut Self>, state: &PlayerState) {
+        let bytes = |v: Option<u64>| v.map_or(-1.0, |n| n as f64);
+        let (internal, card) = (state.internal.as_ref(), state.card.as_ref());
+        self.as_mut().set_player_connected(state.connected);
+        self.as_mut().set_player_mtp(state.mtp);
+        self.as_mut()
+            .set_internal_total(bytes(internal.map(|v| v.total)));
+        self.as_mut()
+            .set_internal_free(bytes(internal.map(|v| v.free)));
+        self.as_mut().set_sd_total(bytes(card.map(|v| v.total)));
+        self.as_mut().set_sd_free(bytes(card.map(|v| v.free)));
+        let (kind, version) = match &state.firmware {
+            Firmware::Stock => ("stock", ""),
+            Firmware::StockWithRockboxFiles => ("stock-rockbox", ""),
+            Firmware::Rockbox { version } => ("rockbox", version.as_str()),
+            Firmware::Unknown => ("", ""),
+        };
+        self.as_mut().set_firmware_kind(QString::from(kind));
+        self.as_mut().set_firmware_version(QString::from(version));
+        self.set_bootloader_pending(state.bootloader_pending);
     }
 
     fn set_rows(mut self: Pin<&mut Self>, rows: Vec<JobView>) {
@@ -503,9 +653,127 @@ impl qobject::Backend {
         }
     }
 
+    fn rockbox_check(&self) {
+        if let Some(engine) = self.engine() {
+            engine.rockbox_check();
+        }
+    }
+
+    fn rockbox_update(&self) {
+        if let Some(engine) = self.engine() {
+            engine.rockbox_update();
+        }
+    }
+
+    fn rockbox_rollback(&self) {
+        if let Some(engine) = self.engine() {
+            engine.rockbox_rollback();
+        }
+    }
+
+    fn rockbox_install_fonts(&self) {
+        if let Some(engine) = self.engine() {
+            engine.rockbox_install_fonts();
+        }
+    }
+
+    fn rockbox_install_voice(&self) {
+        if let Some(engine) = self.engine() {
+            engine.rockbox_install_voice();
+        }
+    }
+
+    fn rockbox_install_theme(&self, id: &QString) {
+        if let Some(engine) = self.engine() {
+            engine.rockbox_install_theme(&id.to_string());
+        }
+    }
+
+    fn rockbox_uninstall(&self, full: bool) {
+        if let Some(engine) = self.engine() {
+            engine.rockbox_uninstall(full);
+        }
+    }
+
+    fn rockbox_install_bootloader(&self) {
+        if let Some(engine) = self.engine() {
+            engine.rockbox_install_bootloader();
+        }
+    }
+
+    fn rockbox_restore_stock(&self) {
+        if let Some(engine) = self.engine() {
+            engine.rockbox_restore_stock();
+        }
+    }
+
+    fn rockbox_install_first(&self) {
+        if let Some(engine) = self.engine() {
+            engine.rockbox_install_first();
+        }
+    }
+
+    fn eject_player(&self) {
+        if let Some(engine) = self.engine() {
+            engine.eject_player();
+        }
+    }
+
+    fn load_rockbox_themes(&self) {
+        if let Some(engine) = self.engine() {
+            engine.rockbox_themes();
+        }
+    }
+
+    fn choose_rockbox_channel(&self, channel: &QString) {
+        let channel = match channel.to_string().as_str() {
+            "dev" => Channel::Dev,
+            "daily" => Channel::Daily,
+            "release" => Channel::Release,
+            _ => return,
+        };
+        if let Some(engine) = self.engine() {
+            engine.set_rockbox_channel(channel);
+        }
+    }
+
+    fn change_database_auto_update(mut self: Pin<&mut Self>, on: bool) {
+        // The engine re-reads the file after the write and corrects this value.
+        self.as_mut().set_database_auto_update(on);
+        if let Some(engine) = self.engine() {
+            engine.set_database_autoupdate(on);
+        }
+    }
+
+    fn dismiss_songs_copied(self: Pin<&mut Self>) {
+        self.set_songs_copied(false);
+    }
+
     fn shutdown(&self) {
         if let Some(engine) = self.engine() {
             engine.shutdown();
         }
     }
+}
+
+fn channel_key(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Dev => "dev",
+        Channel::Daily => "daily",
+        Channel::Release => "release",
+    }
+}
+
+fn themes_json(themes: &[Theme]) -> String {
+    let values: Vec<_> = themes
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "id": t.id, "name": t.name, "author": t.author,
+                "size": engine::format_free(t.size), "preview": t.preview,
+                "about": t.about, "installed": false
+            })
+        })
+        .collect();
+    serde_json::Value::Array(values).to_string()
 }

@@ -12,23 +12,27 @@ ColumnLayout {
     property string channel: "dev"
     property string latestVersion
     property bool updateAvailable: false
-    // "installed", "missing" or "pending"
+    property bool canRollBack: false
+    // True while a Rockbox job runs
+    property bool busy: false
+    // "installed" or "pending"
     property string bootloader
-    property bool fontsInstalled: false
-    property string fontsNote
-    property string voiceNote
-    // Each theme: { name, author, size, preview, installed }
+    // Each theme: { id, name, author, size, preview, installed }
     property var themes: []
+    property bool themesLoaded: false
     property bool databaseAutoUpdate: false
+    // False when the setting could not be read from the player
+    property bool databaseKnown: false
 
     signal channelSelected(string channel)
     signal updateRequested
+    signal rollbackRequested
     signal reinstallBootloaderRequested
     signal installFontsRequested
     signal updateVoiceRequested
-    signal installThemeRequested(string name)
+    signal installThemeRequested(string id)
     signal databaseAutoUpdateToggled(bool on)
-    signal uninstallRequested
+    signal restoreStockRequested
 
     spacing: Kirigami.Units.largeSpacing
 
@@ -70,21 +74,33 @@ ColumnLayout {
                     implicitHeight: Kirigami.Units.iconSizes.small
                 }
                 Controls.Label {
-                    text: manage.bootloader === "installed" ? "Installed, Rockbox bootloader" : manage.bootloader === "pending" ? "Waiting to be flashed" : "Not installed"
+                    text: manage.bootloader === "installed" ? "Installed, Rockbox bootloader" : "Waiting to be flashed"
                 }
             }
             RowLayout {
                 spacing: Kirigami.Units.smallSpacing
                 Controls.Button {
-                    text: "Update Rockbox"
-                    icon.name: "update-none"
+                    text: manage.updateAvailable ? "Update Rockbox" : "Reinstall Rockbox"
+                    icon.name: manage.updateAvailable ? "update-none" : "view-refresh"
                     highlighted: manage.updateAvailable
+                    enabled: !manage.busy && manage.latestVersion !== ""
+                    Controls.ToolTip.text: manage.updateAvailable ? manage.installedVersion + " to " + manage.latestVersion : "Install " + manage.latestVersion + " again"
+                    Controls.ToolTip.visible: hovered
+                    Controls.ToolTip.delay: Kirigami.Units.toolTipDelay
                     onClicked: manage.updateRequested()
+                }
+                Controls.Button {
+                    text: "Previous build"
+                    icon.name: "edit-undo"
+                    visible: manage.canRollBack
+                    enabled: !manage.busy
+                    onClicked: manage.rollbackRequested()
                 }
                 Controls.Button {
                     text: "Reinstall bootloader"
                     icon.name: "view-refresh"
-                    onClicked: manage.reinstallBootloaderRequested()
+                    enabled: !manage.busy
+                    onClicked: bootloaderConfirm.open()
                 }
             }
         }
@@ -103,12 +119,13 @@ ColumnLayout {
                 size: modelData.size
                 preview: modelData.preview
                 installed: modelData.installed
-                onInstallRequested: manage.installThemeRequested(modelData.name)
+                busy: manage.busy
+                onInstallRequested: manage.installThemeRequested(modelData.id)
             }
         }
         Controls.Label {
             visible: manage.themes.length === 0
-            text: "No themes to show."
+            text: manage.themesLoaded ? "No themes to show." : "Loading themes"
             color: Kirigami.Theme.disabledTextColor
         }
     }
@@ -122,11 +139,12 @@ ColumnLayout {
             Controls.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: manage.fontsNote !== "" ? manage.fontsNote : "Some themes need the standard font pack."
+                text: "Some themes need the standard font pack."
             }
             Controls.Button {
-                text: manage.fontsInstalled ? "Reinstall fonts" : "Install fonts"
+                text: "Install fonts"
                 icon.name: "download"
+                enabled: !manage.busy
                 onClicked: manage.installFontsRequested()
             }
         }
@@ -141,11 +159,12 @@ ColumnLayout {
             Controls.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: manage.voiceNote !== "" ? manage.voiceNote : "Lets the player speak menus and file names."
+                text: "Lets the player speak menus and file names."
             }
             Controls.Button {
                 text: "Update voice file"
                 icon.name: "update-none"
+                enabled: !manage.busy
                 onClicked: manage.updateVoiceRequested()
             }
         }
@@ -157,7 +176,8 @@ ColumnLayout {
         Delegates.SwitchSubtitleDelegate {
             Layout.fillWidth: true
             text: "Update the database automatically"
-            subtitle: "New songs show up without opening Database > Update Now on the player."
+            subtitle: manage.databaseKnown ? "New songs show up without opening Settings > General Settings > Database > Update Now on the player." : "The setting could not be read from the player. Turn it on or off here to set it."
+            enabled: !manage.busy
             checked: manage.databaseAutoUpdate
             onToggled: manage.databaseAutoUpdateToggled(checked)
         }
@@ -172,11 +192,12 @@ ColumnLayout {
             Controls.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: "Removes Rockbox and its bootloader, then restores the SanDisk firmware. Your songs stay on the card."
+                text: "Writes the SanDisk firmware to the player. Your songs stay on the card."
             }
             Controls.Button {
-                text: "Uninstall Rockbox"
-                icon.name: "edit-delete"
+                text: "Restore stock firmware"
+                icon.name: "edit-undo"
+                enabled: !manage.busy
                 onClicked: confirm.open()
             }
         }
@@ -184,9 +205,17 @@ ColumnLayout {
 
     Kirigami.PromptDialog {
         id: confirm
-        title: "Uninstall Rockbox?"
-        subtitle: "The player goes back to the SanDisk firmware. Your songs stay on the card."
+        title: "Restore the SanDisk firmware?"
+        subtitle: "The app writes the file and ejects the player. Unplug it, then turn it on while holding Left (|<<) so the stock firmware starts and flashes the file. Plug it in again and use Remove Rockbox files."
         standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
-        onAccepted: manage.uninstallRequested()
+        onAccepted: manage.restoreStockRequested()
+    }
+
+    Kirigami.PromptDialog {
+        id: bootloaderConfirm
+        title: "Reinstall the bootloader?"
+        subtitle: "The app writes the bootloader file and ejects the player. You then unplug it and it flashes itself in about a minute."
+        standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
+        onAccepted: manage.reinstallBootloaderRequested()
     }
 }

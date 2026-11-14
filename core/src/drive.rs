@@ -5,8 +5,8 @@
 use crate::transfer;
 use rustix::fd::OwnedFd;
 use rustix::fs::{
-    AtFlags, CWD, Dir, FileType, Mode, OFlags, fstatvfs, fsync, mkdirat, openat, renameat, statat,
-    unlinkat,
+    Advice, AtFlags, CWD, Dir, FileType, Mode, OFlags, fadvise, fstatvfs, fsync, mkdirat, openat,
+    renameat, statat, unlinkat,
 };
 use rustix::io::Errno;
 use std::ffi::{OsStr, OsString};
@@ -94,6 +94,8 @@ fn protected(parts: &[String]) -> bool {
     matches!(
         name.as_str(),
         "config.cfg"
+            | "config.cfg.new"
+            | "config.cfg.old"
             | "fixed.cfg"
             | ".resume.cfg"
             | ".playlist_control"
@@ -127,6 +129,8 @@ pub struct Drive {
     relaxed: bool,
     #[cfg(test)]
     fail_after: std::cell::Cell<Option<usize>>,
+    #[cfg(test)]
+    fail_sync: std::cell::Cell<bool>,
 }
 
 const DIR_FLAGS: OFlags = OFlags::RDONLY
@@ -179,6 +183,8 @@ impl Drive {
             relaxed: _relaxed,
             #[cfg(test)]
             fail_after: std::cell::Cell::new(None),
+            #[cfg(test)]
+            fail_sync: std::cell::Cell::new(false),
         }
     }
 
@@ -188,6 +194,12 @@ impl Drive {
         let file = File::open(root).unwrap();
         let dev = file.metadata().map_or(0, |m| m.dev());
         Self::new(root, file.into(), dev, true)
+    }
+
+    /// Makes every folder flush fail.
+    #[cfg(test)]
+    pub fn fail_sync(&self) {
+        self.fail_sync.set(true);
     }
 
     /// Makes the check fail after `n` more successful checks.
@@ -266,8 +278,11 @@ impl Drive {
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )?;
+        let mut file = File::from(fd);
+        // Drop cached pages so a read after a write checks the device.
+        let _ = fadvise(&file, 0, None, Advice::DontNeed);
         let mut bytes = Vec::new();
-        File::from(fd).read_to_end(&mut bytes)?;
+        file.read_to_end(&mut bytes)?;
         Ok(bytes)
     }
 
@@ -296,6 +311,25 @@ impl Drive {
             let _ = unlinkat(&parent, &temp, AtFlags::empty());
         }
         result.map_err(fail)
+    }
+
+    /// Renames a file, replacing the target.
+    pub fn rename(&self, from: &RelPath, to: &RelPath) -> Result<(), String> {
+        self.check()?;
+        let (from_names, to_names) = (parts(&from.path), parts(&to.path));
+        let (Some((from_name, from_dir)), Some((to_name, to_dir))) =
+            (from_names.split_last(), to_names.split_last())
+        else {
+            return Err("empty path".into());
+        };
+        let from_parent = self
+            .dir_of(from_dir, false)
+            .map_err(|e| format!("{}: {}", from.text(), text(e)))?;
+        let to_parent = self
+            .dir_of(to_dir, false)
+            .map_err(|e| format!("{}: {}", to.text(), text(e)))?;
+        renameat(&from_parent, *from_name, &to_parent, *to_name)
+            .map_err(|e| format!("{} to {}: {}", from.text(), to.text(), text(e)))
     }
 
     /// Returns false when the file was not there or could not be removed.
@@ -374,10 +408,13 @@ impl Drive {
     }
 
     /// Flushes a folder. The empty path is the drive root.
-    pub fn sync_dir(&self, rel: &Path) {
-        if let Ok(dir) = self.dir_of(&parts(rel), false) {
-            let _ = fsync(&dir);
+    pub fn sync_dir(&self, rel: &Path) -> Result<(), String> {
+        #[cfg(test)]
+        if self.fail_sync.get() {
+            return Err("flush failed".into());
         }
+        let dir = self.dir_of(&parts(rel), false).map_err(text)?;
+        fsync(&dir).map_err(text)
     }
 }
 

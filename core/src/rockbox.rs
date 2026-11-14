@@ -22,6 +22,8 @@ const BINARY: &str = ".rockbox/rockbox.sansa";
 const INFO_FILE: &str = ".rockbox/rockbox-info.txt";
 const LOG_FILE: &str = ".rockbox/rbutil.log";
 const CONFIG_FILE: &str = ".rockbox/config.cfg";
+// Newer Rockbox saves settings here and renames it over config.cfg on the next boot.
+const CONFIG_NEW_FILE: &str = ".rockbox/config.cfg.new";
 const SPACE_MARGIN: u64 = 1_000_000;
 const MAX_UNPACKED: u64 = 512 * 1024 * 1024;
 const PART: &str = "download.zip.part";
@@ -632,7 +634,7 @@ fn install_zip(
         files.push(item.rel.clone());
     }
     for dir in dirs.iter().chain([&PathBuf::new()]) {
-        drive.sync_dir(dir);
+        drive.sync_dir(dir)?;
     }
     Ok(files)
 }
@@ -657,7 +659,7 @@ fn delete_files(drive: &Drive, files: &[RelPath]) -> Result<usize, String> {
     for dir in dirs {
         drive.remove_dir(&dir)?;
     }
-    drive.sync_dir(Path::new(""));
+    drive.sync_dir(Path::new(""))?;
     Ok(removed)
 }
 
@@ -853,7 +855,7 @@ pub fn install_voice(
 
 // Themes --------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Theme {
     pub id: String,
     pub name: String,
@@ -986,7 +988,7 @@ pub fn uninstall_sections(drive: &Drive, sections: &[String]) -> Result<usize, S
 pub fn uninstall(drive: &Drive, full: bool) -> Result<usize, String> {
     if full {
         let count = drive.remove_tree(Path::new(".rockbox"))?;
-        drive.sync_dir(Path::new(""));
+        drive.sync_dir(Path::new(""))?;
         return Ok(count);
     }
     let log = RbLog::load(drive);
@@ -1050,21 +1052,54 @@ fn edit_setting(text: &str, key: &str, value: &str) -> String {
     lines.concat()
 }
 
-/// Turns the player's database auto update on or off in `config.cfg`.
+/// Reads the setting from `config.cfg.new` when it exists, since Rockbox loads
+/// that one next, else from `config.cfg`. Rockbox defaults to off when the line
+/// is missing. None when Rockbox is not installed or the file cannot be read.
+pub fn read_database_autoupdate(mount: &Path) -> Option<bool> {
+    if !mount.join(".rockbox").is_dir() {
+        return None;
+    }
+    let bytes =
+        [CONFIG_NEW_FILE, CONFIG_FILE]
+            .iter()
+            .find_map(|name| match fs::read(mount.join(name)) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                other => Some(other),
+            });
+    let text = match bytes {
+        Some(Ok(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+        Some(Err(_)) => return None,
+        None => return Some(false),
+    };
+    let value = text.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "tagcache_autoupdate").then(|| value.trim().to_string())
+    });
+    Some(value.is_some_and(|v| v == "on"))
+}
+
+/// Turns the player's database auto update on or off in `config.cfg`, and in
+/// `config.cfg.new` when that exists, so the pending copy does not undo it.
+/// These two edits are the only writes to the player's settings files.
 pub fn set_database_autoupdate(drive: &Drive, on: bool) -> Result<(), String> {
     if !drive.is_dir(Path::new(".rockbox")) {
         return Err("Rockbox is not installed on the player".into());
     }
-    let rel = RelPath::parse(CONFIG_FILE)?;
-    let text = match drive.read(&rel) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e.to_string()),
+    let value = if on { "on" } else { "off" };
+    let edit = |name: &str, create: bool| -> Result<(), String> {
+        let rel = RelPath::parse(name)?;
+        let text = match drive.read(&rel) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && create => String::new(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.to_string()),
+        };
+        let edited = edit_setting(&text, "tagcache_autoupdate", value);
+        drive.write(&rel, &mut edited.as_bytes())
     };
-    let edited = edit_setting(&text, "tagcache_autoupdate", if on { "on" } else { "off" });
-    drive.write(&rel, &mut edited.as_bytes())?;
-    drive.sync_dir(Path::new(".rockbox"));
-    Ok(())
+    edit(CONFIG_FILE, true)?;
+    edit(CONFIG_NEW_FILE, false)?;
+    drive.sync_dir(Path::new(".rockbox"))
 }
 
 #[cfg(test)]
@@ -1326,6 +1361,46 @@ about="Simple &lt;b&gt;"
             edit_setting("tagcache_autoupdate_x: 1\n", "tagcache_autoupdate", "on"),
             "tagcache_autoupdate_x: 1\ntagcache_autoupdate: on\n"
         );
+    }
+
+    #[test]
+    fn reads_the_autoupdate_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_database_autoupdate(dir.path()), None);
+        fs::create_dir(dir.path().join(".rockbox")).unwrap();
+        assert_eq!(read_database_autoupdate(dir.path()), Some(false));
+        let cfg = dir.path().join(CONFIG_FILE);
+        fs::write(&cfg, "volume: -20\r\ntagcache_autoupdate: on\r\n").unwrap();
+        assert_eq!(read_database_autoupdate(dir.path()), Some(true));
+        fs::write(&cfg, "tagcache_autoupdate: off\n").unwrap();
+        assert_eq!(read_database_autoupdate(dir.path()), Some(false));
+    }
+
+    #[test]
+    fn the_pending_config_wins_when_reading_and_is_kept_when_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
+        fs::create_dir(dir.path().join(".rockbox")).unwrap();
+        let (cfg, new) = (
+            dir.path().join(CONFIG_FILE),
+            dir.path().join(CONFIG_NEW_FILE),
+        );
+        fs::write(&cfg, "tagcache_autoupdate: off\r\n").unwrap();
+        fs::write(&new, "volume: -5\r\ntagcache_autoupdate: on\r\n").unwrap();
+        assert_eq!(read_database_autoupdate(dir.path()), Some(true));
+        set_database_autoupdate(&drive, false).unwrap();
+        assert_eq!(
+            fs::read_to_string(&new).unwrap(),
+            "volume: -5\r\ntagcache_autoupdate: off\r\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&cfg).unwrap(),
+            "tagcache_autoupdate: off\r\n"
+        );
+        assert_eq!(read_database_autoupdate(dir.path()), Some(false));
+        fs::remove_file(&new).unwrap();
+        set_database_autoupdate(&drive, true).unwrap();
+        assert!(!new.exists(), "no pending file is created");
     }
 
     #[test]
