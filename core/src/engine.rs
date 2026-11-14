@@ -180,7 +180,7 @@ enum Msg {
         result: Result<String, String>,
     },
     RockboxThemes,
-    ThemesListed(Result<Vec<Theme>, String>),
+    ThemesListed(Channel, Result<Vec<Theme>, String>),
     SetRockboxChannel(Channel),
     Free(Option<u64>),
     CopyStarted(u64),
@@ -1151,10 +1151,14 @@ impl Core {
                     Ok(()) => {
                         self.internal_ejected = self.internal.as_ref().map(|c| c.block.clone());
                         self.ejected_block = self.card.as_ref().map(|c| c.block.clone());
-                        let text = if flash {
+                        // Gone and already back before this reply: nothing more to wait for.
+                        let back = gone && self.internal.is_some();
+                        let text = if flash && !back {
                             self.flash_pending = true;
                             self.flash_gone = gone;
                             (self.emit)(UiEvent::FlashPending(true));
+                            text
+                        } else if flash {
                             text
                         } else {
                             format!("{text} Safe to unplug. Restart the player to use it.")
@@ -1235,7 +1239,9 @@ impl Core {
                 self.refresh_player();
             }
             Msg::RockboxThemes => self.list_themes(),
-            Msg::ThemesListed(result) => match result {
+            // A list asked for before a channel change is stale.
+            Msg::ThemesListed(channel, _) if channel != self.cfg.rockbox_channel => {}
+            Msg::ThemesListed(_, result) => match result {
                 Ok(themes) => {
                     self.themes.clone_from(&themes);
                     (self.emit)(UiEvent::Themes(themes));
@@ -1684,7 +1690,7 @@ impl Core {
                         .map(|build| build.version)
                 })
                 .and_then(|version| rockbox::list_themes(&agent, &version));
-            let _ = tx.send(Msg::ThemesListed(result));
+            let _ = tx.send(Msg::ThemesListed(channel, result));
         });
     }
 
@@ -2013,7 +2019,10 @@ impl Core {
             self.run_eject();
         }
         let waiting = self.last_waiting.unwrap_or(0) > 0;
-        let idle = !self.ejecting && !self.eject_after_copy && self.ejected_block.is_none();
+        let idle = !self.ejecting
+            && !self.internal_ejecting
+            && !self.eject_after_copy
+            && self.ejected_block.is_none();
         if (waiting || self.card_cleanup_pending)
             && idle
             && !self.transferring
@@ -2926,6 +2935,52 @@ mod tests {
         assert!(core.flash_pending && core.flash_gone);
         core.on_internal(Some(volume("internal")));
         assert!(!core.flash_pending);
+    }
+
+    #[test]
+    fn a_player_back_before_the_eject_reply_needs_no_flash_wait() {
+        let mut rig = rig();
+        let core = &mut rig.core;
+        core.internal = Some(volume("internal"));
+        core.ejector = Some(Arc::new(|_| Ok(())));
+        core.rockbox_busy = true;
+        core.handle(Msg::RockboxDone {
+            job: RockboxJob::Bootloader,
+            result: Ok(UNPLUG_TEXT.into()),
+        });
+        core.on_internal(None);
+        core.on_internal(Some(volume("internal")));
+        wait_for_player_eject(&mut rig);
+        assert!(!rig.core.flash_pending);
+    }
+
+    #[test]
+    fn a_theme_list_from_before_a_channel_change_is_ignored() {
+        let mut rig = rig();
+        let core = &mut rig.core;
+        core.cfg.rockbox_channel = Channel::Release;
+        core.handle(Msg::ThemesListed(Channel::Dev, Ok(vec![Theme::default()])));
+        assert!(core.themes.is_empty());
+        let events = rig.events.lock().unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, UiEvent::Themes(t) if !t.is_empty()))
+        );
+    }
+
+    #[test]
+    fn the_card_is_not_remounted_while_the_player_ejects() {
+        let mut rig = rig();
+        let core = &mut rig.core;
+        fs::write(core.dirs.outbox.join("a.mp3"), "x").unwrap();
+        core.last_waiting = Some(1);
+        let mut card = volume("card");
+        card.mount = None;
+        core.card = Some(card);
+        core.internal_ejecting = true;
+        core.schedule();
+        assert!(!core.mounting);
     }
 
     #[test]

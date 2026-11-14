@@ -25,7 +25,7 @@ Kirigami.ScrollablePage {
     property bool restoring: false
     property bool themesLoaded: false
 
-    readonly property bool flowActive: !restoring && (installStarted || flashSeen || backend.flashPending || (backend.bootloaderPending && !installed))
+    readonly property bool flowActive: !restoring && !backend.rockboxFailed && (installStarted || flashSeen || backend.flashPending || (backend.bootloaderPending && !installed))
     readonly property int rawStep: {
         if (backend.rockboxBusy)
             return backend.rockboxPhase === "downloading" ? 0 : 1;

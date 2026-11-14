@@ -853,7 +853,7 @@ pub fn install_voice(
 
 // Themes --------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Theme {
     pub id: String,
     pub name: String,
