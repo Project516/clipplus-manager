@@ -14,6 +14,9 @@ Controls.ItemDelegate {
     Keys.onEnterPressed: clicked()
     rightPadding: badge.visible ? badge.width + Kirigami.Units.largeSpacing * 2 : padding
     Accessible.name: badgeText === "" ? text : text + ", " + badgeText
+    // ItemDelegate is exposed as a list item with no press action.
+    Accessible.role: Accessible.Button
+    Accessible.onPressAction: clicked()
 
     Kirigami.Badge {
         id: badge

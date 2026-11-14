@@ -445,6 +445,8 @@ struct Core {
     internal_mounting: bool,
     internal_mount_failed: bool,
     internal_ejected: Option<String>,
+    // Set while the player is ejected after a Rockbox job, so neither drive is remounted mid-eject.
+    internal_ejecting: bool,
     flash_pending: bool,
     flash_gone: bool,
     mtp: bool,
@@ -610,6 +612,7 @@ fn build_core(
         internal_mounting: false,
         internal_mount_failed: false,
         internal_ejected: None,
+        internal_ejecting: false,
         flash_pending: false,
         flash_gone: false,
         mtp: false,
@@ -1122,9 +1125,11 @@ impl Core {
                 text,
                 flash,
             } => {
+                self.internal_ejecting = false;
                 let text = match result {
                     Ok(()) => {
                         self.internal_ejected = self.internal.as_ref().map(|c| c.block.clone());
+                        self.ejected_block = self.card.as_ref().map(|c| c.block.clone());
                         if flash {
                             self.flash_pending = true;
                             self.flash_gone = false;
@@ -1275,6 +1280,7 @@ impl Core {
                     Ok(()) => {
                         self.note = Some(CardNote::Safe);
                         self.ejected_block = self.card.as_ref().map(|c| c.block.clone());
+                        self.internal_ejected = self.internal.as_ref().map(|c| c.block.clone());
                     }
                     Err(e) => self.note = Some(CardNote::EjectError(e)),
                 }
@@ -1517,6 +1523,8 @@ impl Core {
             && i.mount.is_none()
             && !self.internal_mounting
             && !self.internal_mount_failed
+            && !self.ejecting
+            && !self.internal_ejecting
             && self.internal_ejected.as_ref() != Some(&i.block)
             && let Some(udisks) = self.udisks.clone()
         {
@@ -1689,6 +1697,7 @@ impl Core {
             return;
         };
         self.rockbox_status(true, "Ejecting the player".into());
+        self.internal_ejecting = true;
         let tx = self.tx.clone();
         spawn("eject-player", move || {
             rustix::fs::sync();
@@ -1741,6 +1750,7 @@ impl Core {
                 let wanted = appeared || self.last_waiting.unwrap_or(0) > 0;
                 let skip = self.mounting
                     || self.ejecting
+                    || self.internal_ejecting
                     || self.ejected_block.as_ref() == Some(&info.block)
                     || matches!(self.note, Some(CardNote::MountError(_)));
                 if info.mount.is_none() && wanted && !skip {
