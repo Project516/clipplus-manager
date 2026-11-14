@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 const MAX_FINDING: usize = 2;
@@ -176,13 +177,65 @@ enum Msg {
     CheckUpdates,
     UpdateNote(String),
     UpdatesDone(UpdateReport),
-    Shutdown(Sender<ShutdownReply>),
+    Shutdown(Sender<()>),
 }
 
-/// `Waiting` means a Rockbox write is still running and `Done` follows.
-enum ShutdownReply {
-    Waiting,
-    Done,
+#[derive(Default)]
+struct GateState {
+    busy: bool,
+    stopping: bool,
+}
+
+/// Shared by the coordinator, the Rockbox worker and `Engine::shutdown`, so
+/// shutdown can wait for a running install without the coordinator's help.
+#[derive(Clone, Default)]
+struct Gate(Arc<(Mutex<GateState>, Condvar)>);
+
+/// Held by the Rockbox worker. Dropping it, even after a panic or a failed
+/// thread spawn, clears the busy flag.
+struct GateGuard(Gate);
+
+impl Gate {
+    fn state(&self) -> MutexGuard<'_, GateState> {
+        (self.0).0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// None once shutdown began, so no job starts after shutdown looked.
+    fn acquire(&self) -> Option<GateGuard> {
+        let mut state = self.state();
+        if state.stopping {
+            return None;
+        }
+        state.busy = true;
+        Some(GateGuard(self.clone()))
+    }
+
+    fn stop(&self) {
+        self.state().stopping = true;
+    }
+
+    fn wait_idle(&self) {
+        let mut state = self.state();
+        while state.busy {
+            state = (self.0).1.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        self.0.state().busy = false;
+        (self.0.0).1.notify_all();
+    }
+}
+
+type Spawner = fn(&str, Box<dyn FnOnce() + Send>) -> std::io::Result<()>;
+
+fn spawn_thread(name: &str, work: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(work)
+        .map(|_| ())
 }
 
 type Ejector = Arc<dyn Fn(&CardInfo) -> Result<(), String> + Send + Sync>;
@@ -190,6 +243,7 @@ type Ejector = Arc<dyn Fn(&CardInfo) -> Result<(), String> + Send + Sync>;
 #[derive(Clone)]
 pub struct Engine {
     tx: Sender<Msg>,
+    gate: Gate,
 }
 
 impl Engine {
@@ -266,12 +320,17 @@ impl Engine {
     /// Stops running downloads and saves the queue. Waits briefly for that,
     /// and as long as it takes for a running Rockbox install to finish.
     pub fn shutdown(&self) {
+        self.shutdown_within(Duration::from_secs(2));
+    }
+
+    fn shutdown_within(&self, ack_timeout: Duration) {
+        // No Rockbox job may start from here on, whatever the coordinator is doing.
+        self.gate.stop();
         let (ack, done) = channel();
-        if self.tx.send(Msg::Shutdown(ack)).is_ok()
-            && let Ok(ShutdownReply::Waiting) = done.recv_timeout(Duration::from_secs(2))
-        {
-            let _ = done.recv();
+        if self.tx.send(Msg::Shutdown(ack)).is_ok() {
+            let _ = done.recv_timeout(ack_timeout);
         }
+        self.gate.wait_idle();
     }
 }
 
@@ -316,7 +375,8 @@ struct Core {
     udisks: Option<Udisks>,
     ejector: Option<Ejector>,
     eject_deferred: bool,
-    shutdown_ack: Option<Sender<ShutdownReply>>,
+    gate: Gate,
+    spawner: Spawner,
     card: Option<CardInfo>,
     free: Option<u64>,
     note: Option<CardNote>,
@@ -374,11 +434,15 @@ pub fn start(dirs: Dirs, appimage: Option<PathBuf>, emit: Emit) -> Engine {
 
 pub fn start_with(dirs: Dirs, appimage: Option<PathBuf>, emit: Emit, options: Options) -> Engine {
     let (tx, rx) = channel();
-    let engine = Engine { tx: tx.clone() };
+    let gate = Gate::default();
+    let engine = Engine {
+        tx: tx.clone(),
+        gate: gate.clone(),
+    };
     let _ = dirs.create();
     tools::clean_stages(&dirs.tools);
 
-    let (core, resolved) = build_core(&dirs, &appimage, emit, &options, &tx);
+    let (core, resolved) = build_core(&dirs, &appimage, emit, &options, &tx, gate);
 
     // Queued Soulseek downloads resume once slskd is connected.
     if core
@@ -429,6 +493,7 @@ fn build_core(
     emit: Emit,
     options: &Options,
     tx: &Sender<Msg>,
+    gate: Gate,
 ) -> (Core, Resolved) {
     let bundled = options.bundled_tools.clone();
     let (saved_jobs, jobs_ok) = read_json_checked::<Vec<Job>>(&dirs.jobs_file);
@@ -473,7 +538,8 @@ fn build_core(
         udisks: None,
         ejector: None,
         eject_deferred: false,
-        shutdown_ack: None,
+        gate,
+        spawner: spawn_thread,
         card: None,
         free: None,
         note: None,
@@ -1190,11 +1256,8 @@ impl Core {
                 self.flush();
                 if self.rockbox_busy {
                     self.rockbox_status(true, "Finishing the Rockbox install".into());
-                    let _ = ack.send(ShutdownReply::Waiting);
-                    self.shutdown_ack = Some(ack);
-                } else {
-                    let _ = ack.send(ShutdownReply::Done);
                 }
+                let _ = ack.send(());
             }
         }
     }
@@ -1489,6 +1552,9 @@ impl Core {
             self.rockbox_status(false, text.into());
             return;
         };
+        let Some(guard) = self.gate.acquire() else {
+            return;
+        };
         self.rockbox_busy = true;
         self.rockbox_status(true, "Starting".into());
         let tx = self.tx.clone();
@@ -1497,23 +1563,31 @@ impl Core {
             self.cfg.rockbox_channel,
             self.themes.clone(),
         );
-        spawn("rockbox", move || {
+        let work = move || {
             let note = |text: &str| {
                 let _ = tx.send(Msg::RockboxNote(text.into()));
             };
-            let result = Drive::open(&root).and_then(|drive| {
-                run_rockbox(&job, &dirs.rockbox, &drive, channel, &themes, &note)
-            });
+            // The drive handle closes inside the closure, before the eject can start.
+            let run = || {
+                Drive::open(&root).and_then(|drive| {
+                    run_rockbox(&job, &dirs.rockbox, &drive, channel, &themes, &note)
+                })
+            };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+                .unwrap_or_else(|_| Err("The Rockbox job stopped unexpectedly".into()));
             let _ = tx.send(Msg::RockboxDone { job, result });
-        });
+            drop(guard);
+        };
+        if let Err(e) = (self.spawner)("rockbox", Box::new(work)) {
+            // The closure and its gate guard are gone, so shutdown is not held up.
+            self.rockbox_busy = false;
+            self.rockbox_status(false, format!("Could not start the Rockbox job: {e}"));
+        }
     }
 
     /// The player is free for the next Rockbox job or song copy.
     fn rockbox_idle(&mut self) {
         self.rockbox_busy = false;
-        if let Some(ack) = self.shutdown_ack.take() {
-            let _ = ack.send(ShutdownReply::Done);
-        }
     }
 
     /// Unmounts the internal drive and powers it off, so the player can restart.
@@ -2426,6 +2500,7 @@ mod tests {
 
     struct Rig {
         core: Core,
+        tx: Sender<Msg>,
         rx: Receiver<Msg>,
         events: Arc<std::sync::Mutex<Vec<UiEvent>>>,
         _dir: tempfile::TempDir,
@@ -2444,9 +2519,10 @@ mod tests {
             bundled_tools: None,
         };
         let (tx, rx) = channel();
-        let (core, _) = build_core(&dirs, &None, emit, &options, &tx);
+        let (core, _) = build_core(&dirs, &None, emit, &options, &tx, Gate::default());
         Rig {
             core,
+            tx,
             rx,
             events,
             _dir: dir,
@@ -2520,15 +2596,14 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_waits_for_a_running_rockbox_job() {
+    fn the_coordinator_drops_queued_jobs_on_shutdown() {
         let mut rig = rig();
         let core = &mut rig.core;
         core.rockbox_busy = true;
         core.rockbox_queue.push_back(RockboxJob::Fonts);
         let (ack, done) = channel();
         core.handle(Msg::Shutdown(ack));
-        assert!(matches!(done.try_recv(), Ok(ShutdownReply::Waiting)));
-        assert!(done.try_recv().is_err(), "not done while the job runs");
+        assert!(done.try_recv().is_ok());
         assert!(core.rockbox_queue.is_empty(), "queued jobs do not start");
         let says = rig.events.lock().unwrap().iter().any(|e| {
             matches!(e, UiEvent::RockboxStatus { text, .. } if text == "Finishing the Rockbox install")
@@ -2540,11 +2615,89 @@ mod tests {
             job: RockboxJob::Update,
             result: Ok("Rockbox is installed.".into()),
         });
-        assert!(matches!(done.try_recv(), Ok(ShutdownReply::Done)));
         assert!(!core.rockbox_busy);
+        assert!(core.ejector.is_none() && !core.eject_deferred);
+    }
 
-        let (ack, done) = channel();
-        core.handle(Msg::Shutdown(ack));
-        assert!(matches!(done.try_recv(), Ok(ShutdownReply::Done)));
+    fn within(limit: Duration, work: impl FnOnce() + Send + 'static) -> bool {
+        let (done, finished) = channel();
+        std::thread::spawn(move || {
+            work();
+            let _ = done.send(());
+        });
+        finished.recv_timeout(limit).is_ok()
+    }
+
+    #[test]
+    fn shutdown_waits_for_a_job_even_when_the_coordinator_answers_late() {
+        let gate = Gate::default();
+        let (tx, rx) = channel();
+        let engine = Engine {
+            tx,
+            gate: gate.clone(),
+        };
+        // A coordinator that takes far longer than the acknowledgement timeout.
+        std::thread::spawn(move || {
+            if let Ok(Msg::Shutdown(ack)) = rx.recv() {
+                std::thread::sleep(Duration::from_millis(300));
+                let _ = ack.send(());
+            }
+        });
+        let guard = gate.acquire().unwrap();
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        let waiter = std::thread::spawn(move || {
+            engine.shutdown_within(Duration::from_millis(20));
+            flag.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "shutdown left a running job"
+        );
+        assert!(
+            gate.acquire().is_none(),
+            "a new job started during shutdown"
+        );
+        drop(guard);
+        waiter.join().unwrap();
+        assert!(finished.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_worker_that_fails_to_start_does_not_hold_up_shutdown() {
+        let mut rig = rig();
+        let gate = rig.core.gate.clone();
+        let engine = Engine {
+            tx: rig.tx.clone(),
+            gate,
+        };
+        let core = &mut rig.core;
+        core.spawner = |_, _| Err(std::io::Error::other("no threads"));
+        core.internal = Some(volume("internal"));
+        core.rockbox_queue.push_back(RockboxJob::Fonts);
+        core.start_rockbox();
+        assert!(!core.rockbox_busy);
+        let reported = rig.events.lock().unwrap().iter().any(|e| {
+            matches!(e, UiEvent::RockboxStatus { busy: false, text } if text.contains("Could not start"))
+        });
+        assert!(reported);
+        // Nothing answers the shutdown message here, and the gate is clear.
+        assert!(within(Duration::from_secs(10), move || engine
+            .shutdown_within(Duration::from_millis(20))));
+    }
+
+    #[test]
+    fn a_panicking_worker_still_clears_the_gate() {
+        let gate = Gate::default();
+        let worker = {
+            let guard = gate.acquire().unwrap();
+            std::thread::spawn(move || {
+                let _guard = guard;
+                panic!("worker failed");
+            })
+        };
+        assert!(worker.join().is_err());
+        assert!(within(Duration::from_secs(10), move || gate.wait_idle()));
     }
 }

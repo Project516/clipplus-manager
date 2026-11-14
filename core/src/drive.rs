@@ -1,13 +1,21 @@
 //! Safe writes to the player's internal drive. Paths are compared the way
 //! vfat does, only a few folders under `.rockbox` may change, and every
-//! change checks that the same volume is still mounted.
+//! change goes through the directory handle opened when the job started.
 
 use crate::transfer;
-use std::fs::{self, File};
+use rustix::fd::OwnedFd;
+use rustix::fs::{
+    AtFlags, CWD, Dir, FileType, Mode, OFlags, fstatvfs, fsync, mkdirat, openat, renameat, statat,
+    unlinkat,
+};
+use rustix::io::Errno;
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
 use std::io::{self, Read};
-#[cfg(test)]
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// A path without `.`, `..` or empty parts, lowercased because vfat ignores case.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -107,39 +115,79 @@ impl Scope {
     }
 }
 
-/// The mounted internal drive. The device id is taken when the job starts.
+/// The mounted internal drive. All work goes through the directory handle
+/// opened when the job starts, so a volume mounted later on the same path is
+/// never touched. The device id check only gives an early "player went away".
 pub struct Drive {
+    dir: OwnedFd,
     root: PathBuf,
     dev: u64,
+    lost: AtomicBool,
     #[cfg(test)]
     relaxed: bool,
     #[cfg(test)]
     fail_after: std::cell::Cell<Option<usize>>,
 }
 
+const DIR_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn temp_suffix() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(TEMP_COUNTER.fetch_add(1, Ordering::Relaxed));
+    format!("{:08x}", hasher.finish() & 0xffff_ffff)
+}
+
+fn parts(rel: &Path) -> Vec<&OsStr> {
+    rel.components().map(|c| c.as_os_str()).collect()
+}
+
+fn text(error: Errno) -> String {
+    io::Error::from(error).to_string()
+}
+
 impl Drive {
-    /// Fails when nothing is mounted at `root`.
+    /// Fails when nothing is mounted at `root`. Keeps the root open until dropped.
     pub fn open(root: &Path) -> Result<Self, String> {
         let dev = transfer::mount_device(root).map_err(|_| "The player is not mounted")?;
-        Ok(Self {
+        let fd = openat(
+            CWD,
+            root,
+            DIR_FLAGS.difference(OFlags::NOFOLLOW),
+            Mode::empty(),
+        )
+        .map_err(|e| format!("The player is not mounted: {}", text(e)))?;
+        let file = File::from(fd);
+        if file.metadata().map_err(|e| e.to_string())?.dev() != dev {
+            return Err("The player changed while it was being opened".into());
+        }
+        Ok(Self::new(root, file.into(), dev, false))
+    }
+
+    fn new(root: &Path, dir: OwnedFd, dev: u64, _relaxed: bool) -> Self {
+        Self {
+            dir,
             root: root.to_path_buf(),
             dev,
+            lost: AtomicBool::new(false),
             #[cfg(test)]
-            relaxed: false,
+            relaxed: _relaxed,
             #[cfg(test)]
             fail_after: std::cell::Cell::new(None),
-        })
+        }
     }
 
     /// A plain folder standing in for the drive.
     #[cfg(test)]
     pub fn for_test(root: &Path) -> Self {
-        Self {
-            root: root.to_path_buf(),
-            dev: fs::metadata(root).map_or(0, |m| m.dev()),
-            relaxed: true,
-            fail_after: std::cell::Cell::new(None),
-        }
+        let file = File::open(root).unwrap();
+        let dev = file.metadata().map_or(0, |m| m.dev());
+        Self::new(root, file.into(), dev, true)
     }
 
     /// Makes the check fail after `n` more successful checks.
@@ -148,113 +196,211 @@ impl Drive {
         self.fail_after.set(Some(n));
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    pub fn free_space(&self) -> Option<u64> {
-        transfer::free_space(&self.root)
-    }
-
     fn current_device(&self) -> io::Result<u64> {
         #[cfg(test)]
         if self.relaxed {
-            return fs::metadata(&self.root).map(|m| m.dev());
+            return std::fs::metadata(&self.root).map(|m| m.dev());
         }
         transfer::mount_device(&self.root)
     }
 
-    /// Errors when the volume was unplugged or replaced since the job began.
+    /// True once a check failed. Nothing may touch the drive after that,
+    /// not even to clean up.
+    fn lost(&self) -> bool {
+        self.lost.load(Ordering::SeqCst)
+    }
+
+    /// Errors when the player went away since the job began.
     pub fn check(&self) -> Result<(), String> {
+        const GONE: &str = "The player was unplugged or remounted while it was being written";
+        if self.lost() {
+            return Err(GONE.into());
+        }
         #[cfg(test)]
         if let Some(n) = self.fail_after.get() {
             if n == 0 {
-                return Err("The player changed while it was being written".into());
+                self.lost.store(true, Ordering::SeqCst);
+                return Err(GONE.into());
             }
             self.fail_after.set(Some(n - 1));
         }
         match self.current_device() {
             Ok(dev) if dev == self.dev => Ok(()),
-            _ => Err("The player was unplugged or remounted while it was being written".into()),
+            _ => {
+                self.lost.store(true, Ordering::SeqCst);
+                Err(GONE.into())
+            }
         }
     }
 
-    pub fn path(&self, rel: &RelPath) -> PathBuf {
-        self.root.join(&rel.path)
+    /// Opens the folder one component at a time, never following a symlink.
+    fn dir_of(&self, names: &[&OsStr], create: bool) -> Result<OwnedFd, Errno> {
+        let mut current = openat(&self.dir, ".", DIR_FLAGS, Mode::empty())?;
+        for name in names {
+            if create {
+                match mkdirat(&current, *name, Mode::from_bits_truncate(0o755)) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            current = openat(&current, *name, DIR_FLAGS, Mode::empty())?;
+        }
+        Ok(current)
     }
 
-    /// Writes through a temp name, then renames. Creates the folders.
+    pub fn free_space(&self) -> Option<u64> {
+        fstatvfs(&self.dir)
+            .ok()
+            .map(|s| s.f_bavail.saturating_mul(s.f_frsize))
+    }
+
+    pub fn read(&self, rel: &RelPath) -> io::Result<Vec<u8>> {
+        let names = parts(&rel.path);
+        let (name, parents) = names
+            .split_last()
+            .ok_or_else(|| io::Error::other("empty path"))?;
+        let parent = self.dir_of(parents, false)?;
+        let fd = openat(
+            &parent,
+            *name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let mut bytes = Vec::new();
+        File::from(fd).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn is_dir(&self, rel: &Path) -> bool {
+        self.dir_of(&parts(rel), false).is_ok()
+    }
+
+    /// Writes through a unique temp name, then renames. Creates the folders.
+    /// Removes only the temp file it made, and only while the player is still there.
     pub fn write(&self, rel: &RelPath, data: &mut dyn Read) -> Result<(), String> {
         self.check()?;
-        let dest = self.path(rel);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", rel.text()))?;
-        }
-        let name = dest
-            .file_name()
-            .map(|n| n.to_string_lossy())
-            .unwrap_or_default();
-        let temp = dest.with_file_name(format!(".{name}.part"));
-        let copy = (|| -> Result<(), String> {
-            let mut file = File::create(&temp).map_err(|e| e.to_string())?;
+        let fail = |e: String| format!("{}: {e}", rel.text());
+        let names = parts(&rel.path);
+        let (name, parents) = names
+            .split_last()
+            .ok_or_else(|| fail("empty path".into()))?;
+        let parent = self.dir_of(parents, true).map_err(|e| fail(text(e)))?;
+        let (temp, mut file) = create_temp(&parent, name).map_err(fail)?;
+        let result = (|| -> Result<(), String> {
             io::copy(data, &mut file).map_err(|e| e.to_string())?;
             file.sync_all().map_err(|e| e.to_string())?;
             self.check()?;
-            fs::rename(&temp, &dest).map_err(|e| e.to_string())
+            renameat(&parent, &temp, &parent, *name).map_err(text)
         })();
-        if copy.is_err() {
-            let _ = fs::remove_file(&temp);
+        if result.is_err() && !self.lost() {
+            let _ = unlinkat(&parent, &temp, AtFlags::empty());
         }
-        copy.map_err(|e| format!("{}: {e}", rel.text()))
+        result.map_err(fail)
     }
 
     /// Returns false when the file was not there or could not be removed.
     pub fn remove_file(&self, rel: &RelPath) -> Result<bool, String> {
         self.check()?;
-        Ok(fs::remove_file(self.path(rel)).is_ok())
+        let names = parts(&rel.path);
+        let Some((name, parents)) = names.split_last() else {
+            return Ok(false);
+        };
+        let Ok(parent) = self.dir_of(parents, false) else {
+            return Ok(false);
+        };
+        Ok(unlinkat(&parent, *name, AtFlags::empty()).is_ok())
     }
 
     /// Removes a folder when it is empty. Other failures are ignored.
     pub fn remove_dir(&self, rel: &Path) -> Result<(), String> {
         self.check()?;
-        let _ = fs::remove_dir(self.root.join(rel));
+        let names = parts(rel);
+        if let Some((name, parents)) = names.split_last()
+            && let Ok(parent) = self.dir_of(parents, false)
+        {
+            let _ = unlinkat(&parent, *name, AtFlags::REMOVEDIR);
+        }
         Ok(())
     }
 
-    /// Removes a folder and everything in it. Returns the file count.
+    /// Removes a folder and everything in it, without following symlinks.
+    /// Returns the file count.
     pub fn remove_tree(&self, rel: &Path) -> Result<usize, String> {
-        let dir = self.root.join(rel);
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e.to_string()),
+        let names = parts(rel);
+        let Some((name, parents)) = names.split_last() else {
+            return Ok(0);
         };
+        match self.dir_of(parents, false) {
+            Ok(parent) => self.remove_tree_in(&parent, name),
+            Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => Ok(0),
+            Err(e) => Err(text(e)),
+        }
+    }
+
+    fn remove_tree_in(&self, parent: &OwnedFd, name: &OsStr) -> Result<usize, String> {
+        let dir = match openat(parent, name, DIR_FLAGS, Mode::empty()) {
+            Ok(dir) => dir,
+            Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => return Ok(0),
+            Err(e) => return Err(text(e)),
+        };
+        let mut children = Vec::new();
+        for entry in Dir::read_from(&dir).map_err(text)? {
+            let entry = entry.map_err(text)?;
+            let child = OsStr::from_bytes(entry.file_name().to_bytes()).to_owned();
+            if child == "." || child == ".." {
+                continue;
+            }
+            let is_dir = match entry.file_type() {
+                FileType::Directory => true,
+                FileType::Unknown => statat(&dir, &child, AtFlags::SYMLINK_NOFOLLOW)
+                    .is_ok_and(|s| FileType::from_raw_mode(s.st_mode) == FileType::Directory),
+                _ => false,
+            };
+            children.push((child, is_dir));
+        }
         let mut count = 0;
-        for entry in entries.flatten() {
-            let child = rel.join(entry.file_name());
-            if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                count += self.remove_tree(&child)?;
+        for (child, is_dir) in children {
+            if is_dir {
+                count += self.remove_tree_in(&dir, &child)?;
             } else {
                 self.check()?;
-                fs::remove_file(entry.path()).map_err(|e| e.to_string())?;
+                unlinkat(&dir, &child, AtFlags::empty()).map_err(text)?;
                 count += 1;
             }
         }
         self.check()?;
-        fs::remove_dir(&dir).map_err(|e| e.to_string())?;
+        unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(text)?;
         Ok(count)
     }
 
-    pub fn sync_dir(&self, dir: &Path) {
-        if let Ok(file) = File::open(dir) {
-            let _ = file.sync_all();
+    /// Flushes a folder. The empty path is the drive root.
+    pub fn sync_dir(&self, rel: &Path) {
+        if let Ok(dir) = self.dir_of(&parts(rel), false) {
+            let _ = fsync(&dir);
         }
     }
+}
+
+fn create_temp(parent: &OwnedFd, name: &OsStr) -> Result<(OsString, File), String> {
+    for _ in 0..16 {
+        let mut temp = OsString::from(".");
+        temp.push(name);
+        temp.push(format!(".{}.part", temp_suffix()));
+        let flags =
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        match openat(parent, &temp, flags, Mode::from_bits_truncate(0o644)) {
+            Ok(fd) => return Ok((temp, File::from(fd))),
+            Err(Errno::EXIST) => {}
+            Err(e) => return Err(text(e)),
+        }
+    }
+    Err("no free temporary name".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn key(name: &str) -> Key {
         RelPath::parse(name).unwrap().key
@@ -344,23 +490,125 @@ mod tests {
         assert!(Drive::open(Path::new("/nonexistent/drive")).is_err());
     }
 
+    fn rel(name: &str) -> RelPath {
+        RelPath::parse(name).unwrap()
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut found: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        found
+    }
+
     #[test]
     fn writes_stop_when_the_volume_changes() {
         let dir = tempfile::tempdir().unwrap();
         let drive = Drive::for_test(dir.path());
-        let rel = RelPath::parse(".rockbox/a").unwrap();
         // The first write makes two checks, before it starts and before the rename.
         drive.fail_after(1);
-        assert!(drive.write(&rel, &mut &b"x"[..]).is_err());
+        assert!(drive.write(&rel(".rockbox/a"), &mut &b"x"[..]).is_err());
         assert!(!dir.path().join(".rockbox/a").exists());
-        assert!(!dir.path().join(".rockbox/.a.part").exists());
+
         let drive = Drive::for_test(dir.path());
-        drive.write(&rel, &mut &b"x"[..]).unwrap();
+        drive.write(&rel(".rockbox/a"), &mut &b"x"[..]).unwrap();
         drive.fail_after(0);
-        assert!(drive.remove_file(&rel).is_err());
+        assert!(drive.remove_file(&rel(".rockbox/a")).is_err());
         assert!(dir.path().join(".rockbox/a").exists());
         assert!(drive.remove_dir(Path::new(".rockbox")).is_err());
         assert!(drive.remove_tree(Path::new(".rockbox")).is_err());
         assert!(dir.path().join(".rockbox/a").exists());
+    }
+
+    #[test]
+    fn a_volume_mounted_later_on_the_same_path_is_never_written() {
+        let parent = tempfile::tempdir().unwrap();
+        let mount = parent.path().join("mount");
+        fs::create_dir(&mount).unwrap();
+        let drive = Drive::for_test(&mount);
+        fs::write(mount.join("keep"), "old volume").unwrap();
+        // Another volume takes the path. It is on the same device here, so the
+        // device id check cannot tell.
+        fs::rename(&mount, parent.path().join("old")).unwrap();
+        fs::create_dir(&mount).unwrap();
+        fs::write(mount.join("theirs"), "new volume").unwrap();
+        drive.check().unwrap();
+
+        drive.write(&rel(".rockbox/a"), &mut &b"x"[..]).unwrap();
+        assert_eq!(drive.read(&rel("keep")).unwrap(), b"old volume");
+        assert!(drive.remove_file(&rel("keep")).unwrap());
+        assert!(parent.path().join("old/.rockbox/a").exists());
+        assert!(!parent.path().join("old/keep").exists());
+        assert_eq!(names(&mount), ["theirs"]);
+        assert!(drive.read(&rel("theirs")).is_err());
+    }
+
+    #[test]
+    fn symlinks_on_the_drive_are_never_followed() {
+        use std::os::unix::fs::symlink;
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("music.mp3"), "song").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        symlink(outside.path(), dir.path().join(".rockbox")).unwrap();
+        let drive = Drive::for_test(dir.path());
+
+        assert!(drive.write(&rel(".rockbox/a"), &mut &b"x"[..]).is_err());
+        assert!(!drive.remove_file(&rel(".rockbox/music.mp3")).unwrap());
+        assert_eq!(drive.remove_tree(Path::new(".rockbox")).unwrap(), 0);
+        assert!(drive.read(&rel(".rockbox/music.mp3")).is_err());
+        assert!(!drive.is_dir(Path::new(".rockbox")));
+        assert_eq!(names(outside.path()), ["music.mp3"]);
+
+        let inner = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        fs::create_dir_all(&tree).unwrap();
+        fs::write(tree.join("own"), "x").unwrap();
+        symlink(inner.path(), tree.join("link")).unwrap();
+        fs::write(inner.path().join("other"), "y").unwrap();
+        assert_eq!(drive.remove_tree(Path::new("tree")).unwrap(), 2);
+        assert!(!tree.exists());
+        assert_eq!(names(inner.path()), ["other"]);
+    }
+
+    #[test]
+    fn nothing_is_cleaned_up_after_the_player_went_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
+        drive.fail_after(1);
+        assert!(drive.write(&rel(".rockbox/a"), &mut &b"x"[..]).is_err());
+        let left = names(&dir.path().join(".rockbox"));
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(left[0].starts_with(".a.") && left[0].ends_with(".part"));
+        // After that, every call fails without touching the drive.
+        assert!(drive.write(&rel(".rockbox/b"), &mut &b"x"[..]).is_err());
+        assert!(drive.remove_file(&rel(".rockbox/a")).is_err());
+        assert_eq!(names(&dir.path().join(".rockbox")), left);
+    }
+
+    #[test]
+    fn temp_files_never_replace_an_existing_file() {
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("read failed"))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let rockbox = dir.path().join(".rockbox");
+        fs::create_dir(&rockbox).unwrap();
+        for old in [".a.part", ".a.00000000.part"] {
+            fs::write(rockbox.join(old), "mine").unwrap();
+        }
+        let drive = Drive::for_test(dir.path());
+        assert!(drive.write(&rel(".rockbox/a"), &mut Broken).is_err());
+        assert_eq!(names(&rockbox), [".a.00000000.part", ".a.part"]);
+        drive.write(&rel(".rockbox/a"), &mut &b"new"[..]).unwrap();
+        assert_eq!(names(&rockbox), [".a.00000000.part", ".a.part", "a"]);
+        assert_eq!(fs::read(rockbox.join(".a.part")).unwrap(), b"mine");
+        assert_eq!(fs::read(rockbox.join(".a.00000000.part")).unwrap(), b"mine");
+        assert_eq!(fs::read(rockbox.join("a")).unwrap(), b"new");
     }
 }

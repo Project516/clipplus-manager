@@ -432,7 +432,9 @@ impl RbLog {
     }
 
     fn load(drive: &Drive) -> Self {
-        fs::read(drive.root().join(LOG_FILE))
+        RelPath::parse(LOG_FILE)
+            .ok()
+            .and_then(|rel| drive.read(&rel).ok())
             .map(|bytes| Self::parse(&String::from_utf8_lossy(&bytes)))
             .unwrap_or_default()
     }
@@ -618,18 +620,18 @@ fn install_zip(
             entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
             check_binary(&bytes)?;
             drive.write(&item.rel, &mut bytes.as_slice())?;
-            if fs::read(drive.path(&item.rel)).map_err(|e| e.to_string())? != bytes {
+            if drive.read(&item.rel).map_err(|e| e.to_string())? != bytes {
                 return Err("rockbox.sansa did not match after writing".into());
             }
         } else {
             drive.write(&item.rel, &mut entry)?;
         }
-        if let Some(parent) = drive.path(&item.rel).parent() {
+        if let Some(parent) = item.rel.path.parent() {
             dirs.insert(parent.to_path_buf());
         }
         files.push(item.rel.clone());
     }
-    for dir in dirs.iter().chain([&drive.root().to_path_buf()]) {
+    for dir in dirs.iter().chain([&PathBuf::new()]) {
         drive.sync_dir(dir);
     }
     Ok(files)
@@ -655,7 +657,7 @@ fn delete_files(drive: &Drive, files: &[RelPath]) -> Result<usize, String> {
     for dir in dirs {
         drive.remove_dir(&dir)?;
     }
-    drive.sync_dir(drive.root());
+    drive.sync_dir(Path::new(""));
     Ok(removed)
 }
 
@@ -984,7 +986,7 @@ pub fn uninstall_sections(drive: &Drive, sections: &[String]) -> Result<usize, S
 pub fn uninstall(drive: &Drive, full: bool) -> Result<usize, String> {
     if full {
         let count = drive.remove_tree(Path::new(".rockbox"))?;
-        drive.sync_dir(drive.root());
+        drive.sync_dir(Path::new(""));
         return Ok(count);
     }
     let log = RbLog::load(drive);
@@ -1050,18 +1052,18 @@ fn edit_setting(text: &str, key: &str, value: &str) -> String {
 
 /// Turns the player's database auto update on or off in `config.cfg`.
 pub fn set_database_autoupdate(drive: &Drive, on: bool) -> Result<(), String> {
-    if !drive.root().join(".rockbox").is_dir() {
+    if !drive.is_dir(Path::new(".rockbox")) {
         return Err("Rockbox is not installed on the player".into());
     }
     let rel = RelPath::parse(CONFIG_FILE)?;
-    let text = match fs::read(drive.path(&rel)) {
+    let text = match drive.read(&rel) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.to_string()),
     };
     let edited = edit_setting(&text, "tagcache_autoupdate", if on { "on" } else { "off" });
     drive.write(&rel, &mut edited.as_bytes())?;
-    drive.sync_dir(&drive.root().join(".rockbox"));
+    drive.sync_dir(Path::new(".rockbox"));
     Ok(())
 }
 
@@ -1745,7 +1747,6 @@ about="Simple &lt;b&gt;"
         assert!(install_build_zip(new.path(), &drive, &none).is_err());
         let boot = fs::read(dir.path().join(BINARY)).unwrap();
         assert_eq!(boot, test_binary(b"v1"));
-        assert!(!dir.path().join(".rockbox/.rockbox.sansa.part").exists());
     }
 
     /// Answers each request with what the handler returns: status, ETag, body.
