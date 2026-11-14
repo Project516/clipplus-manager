@@ -147,13 +147,14 @@ fn write_to_player(drive: &Drive, data: &[u8], progress: &dyn Fn(&str)) -> Resul
     let (staging, target) = (RelPath::parse(STAGING_FILE)?, RelPath::parse(OF_FILE)?);
     let result = write_checked(drive, &staging, data).and_then(|()| {
         drive.rename(&staging, &target)?;
-        drive.sync_dir(Path::new(""));
-        Ok(())
+        drive.sync_dir(Path::new("")).inspect_err(|_| {
+            // The rename may not survive, so the player must not find the file either.
+            let _ = drive.remove_file(&target);
+        })
     });
     if result.is_err() {
-        // Never leave a file the player would flash without a good copy behind it.
         let _ = drive.remove_file(&staging);
-        drive.sync_dir(Path::new(""));
+        let _ = drive.sync_dir(Path::new(""));
     }
     result
 }
@@ -211,6 +212,16 @@ mod tests {
         assert_eq!(fs::read(dir.path().join(OF_FILE)).unwrap(), b"firmware");
         let names: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(names.len(), 1, "no staging or temp file is left");
+    }
+
+    #[test]
+    fn a_failed_flush_after_the_rename_removes_the_firmware_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
+        drive.fail_sync();
+        assert!(write_to_player(&drive, b"firmware", &|_| {}).is_err());
+        assert!(!pending(dir.path()));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]

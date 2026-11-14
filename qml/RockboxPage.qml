@@ -13,7 +13,8 @@ Kirigami.ScrollablePage {
     // The internal drive is mounted and readable.
     readonly property bool playerReady: backend.playerConnected && !mtp && backend.internalTotal >= 0
     readonly property bool installed: backend.firmwareKind === "rockbox"
-    readonly property bool leftovers: playerReady && backend.firmwareKind === ""
+    // The stock firmware runs and a .rockbox folder is left on the player.
+    readonly property bool leftovers: playerReady && backend.firmwareKind === "stock-rockbox"
     readonly property var themes: parseThemes(backend.themeList)
 
     // The user started the first install on this page.
@@ -27,7 +28,7 @@ Kirigami.ScrollablePage {
     readonly property bool flowActive: !restoring && (installStarted || flashSeen || backend.flashPending || (backend.bootloaderPending && !installed))
     readonly property int rawStep: {
         if (backend.rockboxBusy)
-            return backend.rockboxStatus.indexOf("Downloading") === 0 ? 0 : 1;
+            return backend.rockboxPhase === "downloading" ? 0 : 1;
         if (backend.flashPending || backend.bootloaderPending)
             return 2;
         if (flashSeen)
@@ -73,9 +74,14 @@ Kirigami.ScrollablePage {
             if (!page.backend.flashPending)
                 page.restoring = false;
         }
-        function onRockboxFailedChanged() {
-            if (page.backend.rockboxFailed && !page.backend.rockboxBusy)
+        function onRockboxPhaseChanged() {
+            if (page.backend.rockboxPhase === "failed")
                 page.finishFlow();
+        }
+        function onRockboxChannelChanged() {
+            // The engine dropped its theme cache, so the old list cannot install.
+            page.themesLoaded = false;
+            page.backend.loadRockboxThemes();
         }
     }
 
@@ -135,7 +141,24 @@ Kirigami.ScrollablePage {
             visible: page.flowActive
             step: page.installStep
             detail: page.backend.rockboxStatus
+            ejected: page.backend.flashPending
+            onEjectRequested: page.backend.ejectPlayer()
             onFinished: page.finishFlow()
+        }
+
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            visible: page.backend.bootloaderPending && page.installed && !page.flowActive && !page.backend.rockboxBusy
+            showCloseButton: false
+            type: Kirigami.MessageType.Warning
+            text: "Eject the player, then unplug it so it can flash the bootloader."
+            actions: [
+                Kirigami.Action {
+                    text: "Eject"
+                    icon.name: "media-eject"
+                    onTriggered: page.backend.ejectPlayer()
+                }
+            ]
         }
 
         // Stock firmware: offer the install.

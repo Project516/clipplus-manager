@@ -26,6 +26,8 @@ pub struct VolumeState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Firmware {
     Stock,
+    /// The stock firmware runs and a `.rockbox` folder is left on the player.
+    StockWithRockboxFiles,
     Rockbox {
         version: String,
     },
@@ -75,16 +77,23 @@ fn volume_state(info: Option<&CardInfo>) -> Option<VolumeState> {
     })
 }
 
-fn firmware(mount: Option<&Path>) -> Firmware {
+/// What runs on the player, by the vendor UDisks reads from the USB device.
+/// Rockbox reports "Rockbox"; the stock firmware reports another vendor.
+fn firmware(mount: Option<&Path>, vendor: &str) -> Firmware {
     let Some(mount) = mount else {
         return Firmware::Unknown;
     };
-    match read_info(mount) {
-        Some(info) if info.target == rockbox::TARGET => Firmware::Rockbox {
-            version: info.version,
-        },
-        _ if !mount.join(".rockbox").exists() => Firmware::Stock,
-        _ => Firmware::Unknown,
+    if vendor.is_empty() {
+        return Firmware::Unknown;
+    }
+    if vendor.eq_ignore_ascii_case("Rockbox") {
+        let version = read_info(mount).map(|i| i.version).unwrap_or_default();
+        return Firmware::Rockbox { version };
+    }
+    if mount.join(".rockbox").exists() {
+        Firmware::StockWithRockboxFiles
+    } else {
+        Firmware::Stock
     }
 }
 
@@ -92,10 +101,11 @@ fn firmware(mount: Option<&Path>) -> Firmware {
 pub fn read_state(volumes: &Volumes, mtp: bool) -> PlayerState {
     let internal = volume_state(volumes.internal.as_ref());
     let mount = internal.as_ref().map(|v| v.mount.as_path());
+    let vendor = volumes.internal.as_ref().map_or("", |i| i.vendor.as_str());
     PlayerState {
         connected: volumes.internal.is_some() || mtp,
         mtp,
-        firmware: firmware(mount),
+        firmware: firmware(mount, vendor),
         bootloader_pending: mount.is_some_and(|m| m.join("clppa.bin").exists()),
         card: volume_state(volumes.card.as_ref()),
         internal,
@@ -296,7 +306,7 @@ mod tests {
         rockbox_drive(dir.path());
         assert!(is_rockbox_volume(dir.path()));
         assert_eq!(
-            firmware(Some(dir.path())),
+            firmware(Some(dir.path()), "Rockbox"),
             Firmware::Rockbox {
                 version: "f9fe698319-261114".into()
             }
@@ -322,12 +332,25 @@ mod tests {
     }
 
     #[test]
-    fn firmware_is_stock_without_a_rockbox_folder() {
+    fn the_vendor_says_which_firmware_runs() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(firmware(Some(dir.path())), Firmware::Stock);
-        fs::create_dir(dir.path().join(".rockbox")).unwrap();
-        assert_eq!(firmware(Some(dir.path())), Firmware::Unknown);
-        assert_eq!(firmware(None), Firmware::Unknown);
+        assert_eq!(firmware(Some(dir.path()), "SanDisk"), Firmware::Stock);
+        assert_eq!(firmware(Some(dir.path()), ""), Firmware::Unknown);
+        assert_eq!(firmware(None, "SanDisk"), Firmware::Unknown);
+        rockbox_drive(dir.path());
+        assert_eq!(
+            firmware(Some(dir.path()), "SanDisk"),
+            Firmware::StockWithRockboxFiles,
+            "files left after going back to stock"
+        );
+        assert_eq!(
+            firmware(Some(dir.path()), "SANDISK"),
+            Firmware::StockWithRockboxFiles
+        );
+        assert!(matches!(
+            firmware(Some(dir.path()), "Rockbox"),
+            Firmware::Rockbox { .. }
+        ));
     }
 
     #[test]
@@ -339,6 +362,7 @@ mod tests {
                 device: "/dev/sdb1".into(),
                 drive: None,
                 mount: mount.map(Path::to_path_buf),
+                vendor: "SanDisk".into(),
             }),
             card: None,
         };

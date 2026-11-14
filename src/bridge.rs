@@ -50,6 +50,7 @@ pub mod qobject {
         #[qproperty(bool, rockbox_busy)]
         #[qproperty(bool, rockbox_failed)]
         #[qproperty(QString, rockbox_status)]
+        #[qproperty(QString, rockbox_phase)]
         #[qproperty(QString, rockbox_channel)]
         #[qproperty(QString, rockbox_latest)]
         #[qproperty(bool, rockbox_update_available)]
@@ -191,6 +192,9 @@ pub mod qobject {
         fn rockbox_install_first(self: &Backend);
 
         #[qinvokable]
+        fn eject_player(self: &Backend);
+
+        #[qinvokable]
         fn load_rockbox_themes(self: &Backend);
 
         #[qinvokable]
@@ -261,6 +265,7 @@ pub struct BackendRust {
     rockbox_busy: bool,
     rockbox_failed: bool,
     rockbox_status: QString,
+    rockbox_phase: QString,
     rockbox_channel: QString,
     rockbox_latest: QString,
     rockbox_update_available: bool,
@@ -383,6 +388,7 @@ impl qobject::Backend {
             UiEvent::FlashPending(on) => self.set_flash_pending(on),
             UiEvent::RockboxFailed(failed) => self.set_rockbox_failed(failed),
             UiEvent::SongsCopied => self.set_songs_copied(true),
+            UiEvent::RockboxPhase(phase) => self.set_rockbox_phase(QString::from(phase)),
         }
     }
 
@@ -399,6 +405,7 @@ impl qobject::Backend {
         self.as_mut().set_sd_free(bytes(card.map(|v| v.free)));
         let (kind, version) = match &state.firmware {
             Firmware::Stock => ("stock", ""),
+            Firmware::StockWithRockboxFiles => ("stock-rockbox", ""),
             Firmware::Rockbox { version } => ("rockbox", version.as_str()),
             Firmware::Unknown => ("", ""),
         };
@@ -694,6 +701,12 @@ impl qobject::Backend {
     fn rockbox_install_first(&self) {
         if let Some(engine) = self.engine() {
             engine.rockbox_install_first();
+        }
+    }
+
+    fn eject_player(&self) {
+        if let Some(engine) = self.engine() {
+            engine.eject_player();
         }
     }
 

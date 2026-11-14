@@ -11,7 +11,10 @@ RowLayout {
     property int step: 0
     // The engine's status text for the running job
     property string detail
+    // False while the firmware file waits on a player that is not ejected yet
+    property bool ejected: true
 
+    signal ejectRequested
     signal finished
 
     readonly property var steps: ["Download", "Copy to the player", "Unplug and flash", "Turn on and check"]
@@ -110,21 +113,37 @@ RowLayout {
             spacing: Kirigami.Units.largeSpacing
             Kirigami.InlineMessage {
                 Layout.fillWidth: true
-                visible: true
+                visible: !flow.ejected
+                showCloseButton: false
+                type: Kirigami.MessageType.Warning
+                text: "Eject the player, then unplug it so it can flash the bootloader."
+                actions: [
+                    Kirigami.Action {
+                        text: "Eject"
+                        icon.name: "media-eject"
+                        onTriggered: flow.ejectRequested()
+                    }
+                ]
+            }
+            Kirigami.InlineMessage {
+                Layout.fillWidth: true
+                visible: flow.ejected
                 showCloseButton: false
                 type: Kirigami.MessageType.Warning
                 text: "Unplug the player now. It flashes the bootloader and powers off by itself in about a minute. Do not touch it."
             }
             Kirigami.Heading {
                 level: 3
-                text: "Unplug the player now"
+                text: flow.ejected ? "Unplug the player now" : "Eject the player first"
             }
             Controls.Label {
                 Layout.fillWidth: true
+                visible: flow.ejected
                 wrapMode: Text.WordWrap
                 text: "1. Pull out the USB cable.\n2. The player shows an update screen and flashes the bootloader. Do not press any buttons.\n3. When it has powered off, hold the power button to turn it on."
             }
             RowLayout {
+                visible: flow.ejected
                 spacing: Kirigami.Units.smallSpacing
                 Controls.BusyIndicator {
                     implicitWidth: Kirigami.Units.iconSizes.smallMedium
@@ -166,7 +185,7 @@ RowLayout {
                 visible: true
                 showCloseButton: false
                 type: Kirigami.MessageType.Positive
-                text: "Rockbox is installed."
+                text: "Rockbox is running on the player."
             }
             Controls.Button {
                 text: "Done"

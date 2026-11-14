@@ -632,7 +632,7 @@ fn install_zip(
         files.push(item.rel.clone());
     }
     for dir in dirs.iter().chain([&PathBuf::new()]) {
-        drive.sync_dir(dir);
+        drive.sync_dir(dir)?;
     }
     Ok(files)
 }
@@ -657,7 +657,7 @@ fn delete_files(drive: &Drive, files: &[RelPath]) -> Result<usize, String> {
     for dir in dirs {
         drive.remove_dir(&dir)?;
     }
-    drive.sync_dir(Path::new(""));
+    drive.sync_dir(Path::new(""))?;
     Ok(removed)
 }
 
@@ -986,7 +986,7 @@ pub fn uninstall_sections(drive: &Drive, sections: &[String]) -> Result<usize, S
 pub fn uninstall(drive: &Drive, full: bool) -> Result<usize, String> {
     if full {
         let count = drive.remove_tree(Path::new(".rockbox"))?;
-        drive.sync_dir(Path::new(""));
+        drive.sync_dir(Path::new(""))?;
         return Ok(count);
     }
     let log = RbLog::load(drive);
@@ -1081,7 +1081,7 @@ pub fn set_database_autoupdate(drive: &Drive, on: bool) -> Result<(), String> {
     };
     let edited = edit_setting(&text, "tagcache_autoupdate", if on { "on" } else { "off" });
     drive.write(&rel, &mut edited.as_bytes())?;
-    drive.sync_dir(Path::new(".rockbox"));
+    drive.sync_dir(Path::new(".rockbox"))?;
     Ok(())
 }
 

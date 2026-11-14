@@ -127,6 +127,8 @@ pub struct Drive {
     relaxed: bool,
     #[cfg(test)]
     fail_after: std::cell::Cell<Option<usize>>,
+    #[cfg(test)]
+    fail_sync: std::cell::Cell<bool>,
 }
 
 const DIR_FLAGS: OFlags = OFlags::RDONLY
@@ -179,6 +181,8 @@ impl Drive {
             relaxed: _relaxed,
             #[cfg(test)]
             fail_after: std::cell::Cell::new(None),
+            #[cfg(test)]
+            fail_sync: std::cell::Cell::new(false),
         }
     }
 
@@ -188,6 +192,12 @@ impl Drive {
         let file = File::open(root).unwrap();
         let dev = file.metadata().map_or(0, |m| m.dev());
         Self::new(root, file.into(), dev, true)
+    }
+
+    /// Makes every folder flush fail.
+    #[cfg(test)]
+    pub fn fail_sync(&self) {
+        self.fail_sync.set(true);
     }
 
     /// Makes the check fail after `n` more successful checks.
@@ -310,10 +320,14 @@ impl Drive {
         else {
             return Err("empty path".into());
         };
-        let fail = |e: Errno| format!("{}: {}", to.text(), text(e));
-        let from_parent = self.dir_of(from_dir, false).map_err(fail)?;
-        let to_parent = self.dir_of(to_dir, false).map_err(fail)?;
-        renameat(&from_parent, *from_name, &to_parent, *to_name).map_err(fail)
+        let from_parent = self
+            .dir_of(from_dir, false)
+            .map_err(|e| format!("{}: {}", from.text(), text(e)))?;
+        let to_parent = self
+            .dir_of(to_dir, false)
+            .map_err(|e| format!("{}: {}", to.text(), text(e)))?;
+        renameat(&from_parent, *from_name, &to_parent, *to_name)
+            .map_err(|e| format!("{} to {}: {}", from.text(), to.text(), text(e)))
     }
 
     /// Returns false when the file was not there or could not be removed.
@@ -392,10 +406,13 @@ impl Drive {
     }
 
     /// Flushes a folder. The empty path is the drive root.
-    pub fn sync_dir(&self, rel: &Path) {
-        if let Ok(dir) = self.dir_of(&parts(rel), false) {
-            let _ = fsync(&dir);
+    pub fn sync_dir(&self, rel: &Path) -> Result<(), String> {
+        #[cfg(test)]
+        if self.fail_sync.get() {
+            return Err("flush failed".into());
         }
+        let dir = self.dir_of(&parts(rel), false).map_err(text)?;
+        fsync(&dir).map_err(text)
     }
 }
 

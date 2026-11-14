@@ -15,7 +15,7 @@ Kirigami.ScrollablePage {
     readonly property real sdTotal: backend.sdTotal
     readonly property real sdFree: backend.sdFree
     // "stock", "rockbox", or "" while unknown. Hides the firmware section.
-    readonly property string firmware: backend.firmwareKind
+    readonly property string firmware: backend.firmwareKind === "stock-rockbox" ? "stock" : backend.firmwareKind
     readonly property string firmwareVersion: backend.firmwareVersion
     readonly property bool mtpMode: backend.playerMtp
     readonly property bool bootloaderPending: backend.bootloaderPending
@@ -84,10 +84,26 @@ Kirigami.ScrollablePage {
 
         Kirigami.InlineMessage {
             Layout.fillWidth: true
-            visible: page.bootloaderPending
+            visible: page.backend.flashPending
             showCloseButton: false
             type: Kirigami.MessageType.Warning
-            text: "Unplug the player now. It flashes the bootloader and powers off by itself in about a minute. Do not touch it."
+            text: "Unplug the player now. It flashes and powers off by itself in about a minute. Do not touch it."
+        }
+
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            visible: page.bootloaderPending && !page.backend.flashPending
+            showCloseButton: false
+            type: Kirigami.MessageType.Warning
+            text: "Eject the player, then unplug it so it can flash the bootloader."
+            actions: [
+                Kirigami.Action {
+                    text: "Eject"
+                    icon.name: "media-eject"
+                    enabled: !page.backend.rockboxBusy
+                    onTriggered: page.backend.ejectPlayer()
+                }
+            ]
         }
 
         Kirigami.InlineMessage {

@@ -26,6 +26,8 @@ pub struct CardInfo {
     pub device: String,
     pub drive: Option<String>,
     pub mount: Option<PathBuf>,
+    /// The UDisks drive vendor. "Rockbox" while Rockbox runs on a Clip+.
+    pub vendor: String,
 }
 
 fn string(props: &Properties, key: &str) -> Option<String> {
@@ -135,6 +137,7 @@ fn volume(path: &OwnedObjectPath, interfaces: &HashMap<String, Properties>) -> O
         device,
         drive,
         mount,
+        vendor: String::new(),
     })
 }
 
@@ -153,7 +156,10 @@ fn volumes_of(
     let mut found: Vec<(Kind, CardInfo)> = objects
         .iter()
         .filter_map(|(path, interfaces)| {
-            let info = volume(path, interfaces)?;
+            let mut info = volume(path, interfaces)?;
+            info.vendor = drive_info(objects, interfaces.get(BLOCK)?)
+                .map(|d| d.vendor)
+                .unwrap_or_default();
             let kind = classify(
                 objects,
                 interfaces.get(BLOCK)?,
