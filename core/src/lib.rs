@@ -1,6 +1,7 @@
 pub mod amsboot;
 pub mod bootloader;
 pub mod card;
+pub mod drive;
 pub mod engine;
 pub mod fixer;
 pub mod instance;

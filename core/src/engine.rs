@@ -2,6 +2,7 @@
 //! the UI and from worker threads. Nothing polls.
 
 use crate::card::{CardInfo, Udisks, Volumes};
+use crate::drive::Drive;
 use crate::musicbrainz::Recording;
 use crate::paths::{Config, Dirs, State, now_secs, read_json, read_json_checked, write_json};
 use crate::player::{self, Firmware, PlayerState};
@@ -175,8 +176,16 @@ enum Msg {
     CheckUpdates,
     UpdateNote(String),
     UpdatesDone(UpdateReport),
-    Shutdown(Sender<()>),
+    Shutdown(Sender<ShutdownReply>),
 }
+
+/// `Waiting` means a Rockbox write is still running and `Done` follows.
+enum ShutdownReply {
+    Waiting,
+    Done,
+}
+
+type Ejector = Arc<dyn Fn(&CardInfo) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Engine {
@@ -254,11 +263,14 @@ impl Engine {
     fn queue_rockbox(&self, job: RockboxJob) {
         let _ = self.tx.send(Msg::RockboxQueue(job));
     }
-    /// Stops running downloads and saves the queue. Waits briefly for that.
+    /// Stops running downloads and saves the queue. Waits briefly for that,
+    /// and as long as it takes for a running Rockbox install to finish.
     pub fn shutdown(&self) {
         let (ack, done) = channel();
-        if self.tx.send(Msg::Shutdown(ack)).is_ok() {
-            let _ = done.recv_timeout(Duration::from_secs(2));
+        if self.tx.send(Msg::Shutdown(ack)).is_ok()
+            && let Ok(ShutdownReply::Waiting) = done.recv_timeout(Duration::from_secs(2))
+        {
+            let _ = done.recv();
         }
     }
 }
@@ -302,6 +314,9 @@ struct Core {
     check_again: bool,
     cancels: HashMap<u64, Arc<Cancel>>,
     udisks: Option<Udisks>,
+    ejector: Option<Ejector>,
+    eject_deferred: bool,
+    shutdown_ack: Option<Sender<ShutdownReply>>,
     card: Option<CardInfo>,
     free: Option<u64>,
     note: Option<CardNote>,
@@ -363,84 +378,7 @@ pub fn start_with(dirs: Dirs, appimage: Option<PathBuf>, emit: Emit, options: Op
     let _ = dirs.create();
     tools::clean_stages(&dirs.tools);
 
-    let bundled = options.bundled_tools.clone();
-    let (saved_jobs, jobs_ok) = read_json_checked::<Vec<Job>>(&dirs.jobs_file);
-    let mut jobs = queue::restore(saved_jobs);
-    // Download folders can outlive a lost jobs file; never reuse their ids.
-    let next_id = jobs
-        .iter()
-        .map(|j| j.id)
-        .chain(download_folder_ids(&dirs.downloads))
-        .max()
-        .unwrap_or(0)
-        + 1;
-    for job in &mut jobs {
-        job.running = false;
-    }
-    if jobs_ok && !dirs.jobs_file.with_extension("json.bad").exists() {
-        remove_stale_downloads(&dirs.downloads, &jobs);
-    }
-
-    let (cfg, config_ok) = read_json_checked(&dirs.config_file);
-    let jobs_writable = jobs_ok || !dirs.jobs_file.exists();
-    let config_writable = config_ok || !dirs.config_file.exists();
-    let resolved = Resolved::load(&dirs.tools, bundled.as_deref());
-    let core = Core {
-        cfg,
-        jobs_writable,
-        config_writable,
-        emit,
-        tx: tx.clone(),
-        jobs,
-        next_id,
-        dirty: true,
-        bundled,
-        tools: resolved.clone(),
-        staged: Vec::new(),
-        appimage: appimage.clone(),
-        app_version: selfupdate::CURRENT.into(),
-        updating: options.updates,
-        manual_update: false,
-        check_again: false,
-        cancels: HashMap::new(),
-        udisks: None,
-        card: None,
-        free: None,
-        note: None,
-        mounting: false,
-        ejecting: false,
-        ejected_block: None,
-        eject_after_copy: false,
-        transferring: false,
-        transfer_failed: false,
-        stopping: false,
-        card_cleanup_pending: false,
-        stop_transfer: Arc::new(AtomicBool::new(false)),
-        batch_copied: 0,
-        last_waiting: None,
-        last_card: None,
-        last_tools: String::new(),
-        soulseek: None,
-        soulseek_starting: false,
-        selected_recording: None,
-        peer_results: Vec::new(),
-        peer_generation: 0,
-        internal: None,
-        internal_mounting: false,
-        internal_mount_failed: false,
-        internal_ejected: None,
-        mtp: false,
-        player_generation: 0,
-        player: None,
-        rockbox_checks: options.updates,
-        rockbox_checking: false,
-        rockbox_busy: false,
-        rockbox_queue: VecDeque::new(),
-        latest: None,
-        last_latest: None,
-        themes: Vec::new(),
-        dirs: dirs.clone(),
-    };
+    let (core, resolved) = build_core(&dirs, &appimage, emit, &options, &tx);
 
     // Queued Soulseek downloads resume once slskd is connected.
     if core
@@ -483,6 +421,97 @@ pub fn start_with(dirs: Dirs, appimage: Option<PathBuf>, emit: Emit, options: Op
         .spawn(move || core.run(rx))
         .expect("spawn coordinator");
     engine
+}
+
+fn build_core(
+    dirs: &Dirs,
+    appimage: &Option<PathBuf>,
+    emit: Emit,
+    options: &Options,
+    tx: &Sender<Msg>,
+) -> (Core, Resolved) {
+    let bundled = options.bundled_tools.clone();
+    let (saved_jobs, jobs_ok) = read_json_checked::<Vec<Job>>(&dirs.jobs_file);
+    let mut jobs = queue::restore(saved_jobs);
+    // Download folders can outlive a lost jobs file; never reuse their ids.
+    let next_id = jobs
+        .iter()
+        .map(|j| j.id)
+        .chain(download_folder_ids(&dirs.downloads))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    for job in &mut jobs {
+        job.running = false;
+    }
+    if jobs_ok && !dirs.jobs_file.with_extension("json.bad").exists() {
+        remove_stale_downloads(&dirs.downloads, &jobs);
+    }
+
+    let (cfg, config_ok) = read_json_checked(&dirs.config_file);
+    let jobs_writable = jobs_ok || !dirs.jobs_file.exists();
+    let config_writable = config_ok || !dirs.config_file.exists();
+    let resolved = Resolved::load(&dirs.tools, bundled.as_deref());
+    let core = Core {
+        cfg,
+        jobs_writable,
+        config_writable,
+        emit,
+        tx: tx.clone(),
+        jobs,
+        next_id,
+        dirty: true,
+        bundled,
+        tools: resolved.clone(),
+        staged: Vec::new(),
+        appimage: appimage.clone(),
+        app_version: selfupdate::CURRENT.into(),
+        updating: options.updates,
+        manual_update: false,
+        check_again: false,
+        cancels: HashMap::new(),
+        udisks: None,
+        ejector: None,
+        eject_deferred: false,
+        shutdown_ack: None,
+        card: None,
+        free: None,
+        note: None,
+        mounting: false,
+        ejecting: false,
+        ejected_block: None,
+        eject_after_copy: false,
+        transferring: false,
+        transfer_failed: false,
+        stopping: false,
+        card_cleanup_pending: false,
+        stop_transfer: Arc::new(AtomicBool::new(false)),
+        batch_copied: 0,
+        last_waiting: None,
+        last_card: None,
+        last_tools: String::new(),
+        soulseek: None,
+        soulseek_starting: false,
+        selected_recording: None,
+        peer_results: Vec::new(),
+        peer_generation: 0,
+        internal: None,
+        internal_mounting: false,
+        internal_mount_failed: false,
+        internal_ejected: None,
+        mtp: false,
+        player_generation: 0,
+        player: None,
+        rockbox_checks: options.updates,
+        rockbox_checking: false,
+        rockbox_busy: false,
+        rockbox_queue: VecDeque::new(),
+        latest: None,
+        last_latest: None,
+        themes: Vec::new(),
+        dirs: dirs.clone(),
+    };
+    (core, resolved)
 }
 
 /// Job ids of `<id>-<generation>` folders in the downloads dir.
@@ -959,7 +988,11 @@ impl Core {
                     self.show_all();
                 }
             }
-            Msg::Udisks(udisks) => self.udisks = Some(udisks),
+            Msg::Udisks(udisks) => {
+                let eject = udisks.clone();
+                self.ejector = Some(Arc::new(move |card| eject.eject(card)));
+                self.udisks = Some(udisks);
+            }
             Msg::Card(result) => self.on_volumes(result),
             Msg::InternalMounted(result) => {
                 self.internal_mounting = false;
@@ -977,6 +1010,7 @@ impl Core {
                     Err(e) => format!("{text} Could not eject the player: {e}"),
                 };
                 self.rockbox_status(false, text);
+                self.rockbox_idle();
                 self.refresh_player();
             }
             Msg::Mtp(on) => {
@@ -1016,13 +1050,22 @@ impl Core {
             }
             Msg::RockboxNote(text) => self.rockbox_status(true, text),
             Msg::RockboxDone { job, result } => {
-                self.rockbox_busy = false;
                 match result {
-                    Ok(text) if matches!(job, RockboxJob::Update | RockboxJob::Rollback) => {
+                    // The player stays busy until the eject is over.
+                    Ok(text)
+                        if !self.stopping
+                            && matches!(job, RockboxJob::Update | RockboxJob::Rollback) =>
+                    {
                         self.eject_internal(text);
                     }
-                    Ok(text) => self.rockbox_status(false, text),
-                    Err(e) => self.rockbox_status(false, e),
+                    Ok(text) => {
+                        self.rockbox_status(false, text);
+                        self.rockbox_idle();
+                    }
+                    Err(e) => {
+                        self.rockbox_status(false, e);
+                        self.rockbox_idle();
+                    }
                 }
                 self.refresh_player();
             }
@@ -1142,9 +1185,16 @@ impl Core {
                 if let Some(client) = self.soulseek.take() {
                     client.stop();
                 }
+                self.rockbox_queue.clear();
                 self.dirty = true;
                 self.flush();
-                let _ = ack.send(());
+                if self.rockbox_busy {
+                    self.rockbox_status(true, "Finishing the Rockbox install".into());
+                    let _ = ack.send(ShutdownReply::Waiting);
+                    self.shutdown_ack = Some(ack);
+                } else {
+                    let _ = ack.send(ShutdownReply::Done);
+                }
             }
         }
     }
@@ -1422,7 +1472,8 @@ impl Core {
 
     /// Runs the next queued Rockbox job once no song copy or other job is running.
     fn start_rockbox(&mut self) {
-        if self.rockbox_busy || self.transferring || self.rockbox_queue.is_empty() {
+        let blocked = self.rockbox_busy || self.transferring || self.ejecting;
+        if blocked || self.stopping || self.rockbox_queue.is_empty() {
             return;
         }
         let Some(job) = self.rockbox_queue.pop_front() else {
@@ -1450,15 +1501,27 @@ impl Core {
             let note = |text: &str| {
                 let _ = tx.send(Msg::RockboxNote(text.into()));
             };
-            let result = run_rockbox(&job, &dirs.rockbox, &root, channel, &themes, &note);
+            let result = Drive::open(&root).and_then(|drive| {
+                run_rockbox(&job, &dirs.rockbox, &drive, channel, &themes, &note)
+            });
             let _ = tx.send(Msg::RockboxDone { job, result });
         });
     }
 
+    /// The player is free for the next Rockbox job or song copy.
+    fn rockbox_idle(&mut self) {
+        self.rockbox_busy = false;
+        if let Some(ack) = self.shutdown_ack.take() {
+            let _ = ack.send(ShutdownReply::Done);
+        }
+    }
+
     /// Unmounts the internal drive and powers it off, so the player can restart.
+    /// The job stays busy until `InternalEjected` arrives.
     fn eject_internal(&mut self, done: String) {
-        let (Some(udisks), Some(card)) = (self.udisks.clone(), self.internal.clone()) else {
+        let (Some(eject), Some(card)) = (self.ejector.clone(), self.internal.clone()) else {
             self.rockbox_status(false, done);
+            self.rockbox_idle();
             return;
         };
         self.rockbox_status(true, "Ejecting the player".into());
@@ -1467,8 +1530,8 @@ impl Core {
         spawn("eject-player", move || {
             rustix::fs::sync();
             let _ = tx.send(Msg::InternalEjected {
-                result: udisks.eject(&card),
-                text: if done.is_empty() { String::new() } else { text },
+                result: eject(&card),
+                text,
             });
         });
     }
@@ -1556,15 +1619,20 @@ impl Core {
         self.refresh_card();
     }
 
+    /// Waits while a Rockbox job holds the player.
     fn run_eject(&mut self) {
-        let (Some(udisks), Some(card)) = (self.udisks.clone(), self.card.clone()) else {
+        if self.rockbox_busy {
+            self.eject_deferred = true;
+            return;
+        }
+        let (Some(eject), Some(card)) = (self.ejector.clone(), self.card.clone()) else {
             return;
         };
         self.ejecting = true;
         let tx = self.tx.clone();
         spawn("eject", move || {
             rustix::fs::sync();
-            let _ = tx.send(Msg::Ejected(udisks.eject(&card)));
+            let _ = tx.send(Msg::Ejected(eject(&card)));
         });
     }
 
@@ -1701,6 +1769,10 @@ impl Core {
             self.start_jobs();
         }
         self.start_rockbox();
+        if self.eject_deferred && !self.rockbox_busy && self.rockbox_queue.is_empty() {
+            self.eject_deferred = false;
+            self.run_eject();
+        }
         let waiting = self.last_waiting.unwrap_or(0) > 0;
         let idle = !self.ejecting && !self.eject_after_copy && self.ejected_block.is_none();
         if (waiting || self.card_cleanup_pending)
@@ -2062,7 +2134,7 @@ fn download(job: &DownloadJob, cancel: &Cancel, tx: &Sender<Msg>) -> Result<Path
 fn run_rockbox(
     job: &RockboxJob,
     work: &Path,
-    root: &Path,
+    drive: &Drive,
     channel: Channel,
     themes: &[Theme],
     progress: &dyn Fn(&str),
@@ -2076,21 +2148,21 @@ fn run_rockbox(
     match job {
         RockboxJob::Update => {
             let (_, build) = resolve()?;
-            let version = rockbox::install_build(&agent, work, root, &build, progress)?;
+            let version = rockbox::install_build(&agent, work, drive, &build, progress)?;
             Ok(format!("Rockbox {version} is installed."))
         }
         RockboxJob::Rollback => {
-            let version = rockbox::install_previous(work, root, progress)?;
+            let version = rockbox::install_previous(work, drive, progress)?;
             Ok(format!("Rockbox {version} is installed."))
         }
         RockboxJob::Fonts => {
             let (_, build) = resolve()?;
-            rockbox::install_fonts(&agent, work, root, &build, progress)?;
+            rockbox::install_fonts(&agent, work, drive, &build, progress)?;
             Ok("Fonts are installed.".into())
         }
         RockboxJob::Voice => {
             let (info, build) = resolve()?;
-            rockbox::install_voice(&agent, work, root, &info, &build, "english", progress)?;
+            rockbox::install_voice(&agent, work, drive, &info, &build, "english", progress)?;
             Ok("The voice file is installed.".into())
         }
         RockboxJob::Theme(id) => {
@@ -2098,15 +2170,15 @@ fn run_rockbox(
                 .iter()
                 .find(|t| &t.id == id)
                 .ok_or("Open the theme list first")?;
-            rockbox::install_theme(&agent, work, root, theme, progress)?;
+            rockbox::install_theme(&agent, work, drive, theme, progress)?;
             Ok(format!("Theme {} is installed.", theme.name))
         }
         RockboxJob::Uninstall(full) => {
-            let count = rockbox::uninstall(root, *full)?;
+            let count = rockbox::uninstall(drive, *full)?;
             Ok(format!("Removed {count} Rockbox files."))
         }
         RockboxJob::Autoupdate(on) => {
-            rockbox::set_database_autoupdate(root, *on)?;
+            rockbox::set_database_autoupdate(drive, *on)?;
             let state = if *on { "on" } else { "off" };
             Ok(format!("Database auto update is {state}."))
         }
@@ -2350,5 +2422,129 @@ mod tests {
         ids.sort_unstable();
         assert_eq!(ids, [3, 7, 12]);
         assert!(download_folder_ids(&dir.path().join("missing")).is_empty());
+    }
+
+    struct Rig {
+        core: Core,
+        rx: Receiver<Msg>,
+        events: Arc<std::sync::Mutex<Vec<UiEvent>>>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn rig() -> Rig {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(&dir.path().join("data"), &dir.path().join("config"));
+        dirs.create().unwrap();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = events.clone();
+        let emit: Emit = Arc::new(move |event| log.lock().unwrap().push(event));
+        let options = Options {
+            card: false,
+            updates: false,
+            bundled_tools: None,
+        };
+        let (tx, rx) = channel();
+        let (core, _) = build_core(&dirs, &None, emit, &options, &tx);
+        Rig {
+            core,
+            rx,
+            events,
+            _dir: dir,
+        }
+    }
+
+    fn volume(mount: &str) -> CardInfo {
+        CardInfo {
+            block: format!("/block{mount}"),
+            device: "/dev/sdb1".into(),
+            drive: None,
+            mount: Some(PathBuf::from(format!("/nonexistent/{mount}"))),
+        }
+    }
+
+    #[test]
+    fn the_player_stays_busy_until_the_update_eject_is_over() {
+        let mut rig = rig();
+        let core = &mut rig.core;
+        core.internal = Some(volume("internal"));
+        core.card = Some(volume("card"));
+        core.ejector = Some(Arc::new(|_| Ok(())));
+        core.rockbox_busy = true;
+        core.handle(Msg::RockboxDone {
+            job: RockboxJob::Update,
+            result: Ok("Rockbox is installed.".into()),
+        });
+        assert!(core.rockbox_busy, "the eject is still to come");
+
+        core.handle(Msg::RockboxQueue(RockboxJob::Fonts));
+        core.start_rockbox();
+        assert_eq!(
+            core.rockbox_queue.len(),
+            1,
+            "no job starts during the eject"
+        );
+
+        core.handle(Msg::Eject);
+        assert!(
+            !core.ejecting && core.eject_deferred,
+            "the card eject waits too"
+        );
+
+        loop {
+            let msg = rig.rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            if matches!(msg, Msg::InternalEjected { .. }) {
+                let core = &mut rig.core;
+                core.handle(msg);
+                break;
+            }
+        }
+        let core = &mut rig.core;
+        assert!(!core.rockbox_busy);
+        core.start_rockbox();
+        assert!(core.rockbox_queue.is_empty() && core.rockbox_busy);
+    }
+
+    #[test]
+    fn no_song_copy_starts_while_a_rockbox_job_holds_the_player() {
+        let mut rig = rig();
+        let core = &mut rig.core;
+        fs::write(core.dirs.outbox.join("a.mp3"), "x").unwrap();
+        core.last_waiting = Some(1);
+        core.card = Some(volume("card"));
+        core.rockbox_busy = true;
+        core.schedule();
+        assert!(!core.transferring);
+        core.rockbox_busy = false;
+        core.schedule();
+        assert!(core.transferring);
+    }
+
+    #[test]
+    fn shutdown_waits_for_a_running_rockbox_job() {
+        let mut rig = rig();
+        let core = &mut rig.core;
+        core.rockbox_busy = true;
+        core.rockbox_queue.push_back(RockboxJob::Fonts);
+        let (ack, done) = channel();
+        core.handle(Msg::Shutdown(ack));
+        assert!(matches!(done.try_recv(), Ok(ShutdownReply::Waiting)));
+        assert!(done.try_recv().is_err(), "not done while the job runs");
+        assert!(core.rockbox_queue.is_empty(), "queued jobs do not start");
+        let says = rig.events.lock().unwrap().iter().any(|e| {
+            matches!(e, UiEvent::RockboxStatus { text, .. } if text == "Finishing the Rockbox install")
+        });
+        assert!(says);
+
+        let core = &mut rig.core;
+        core.handle(Msg::RockboxDone {
+            job: RockboxJob::Update,
+            result: Ok("Rockbox is installed.".into()),
+        });
+        assert!(matches!(done.try_recv(), Ok(ShutdownReply::Done)));
+        assert!(!core.rockbox_busy);
+
+        let (ack, done) = channel();
+        core.handle(Msg::Shutdown(ack));
+        assert!(matches!(done.try_recv(), Ok(ShutdownReply::Done)));
     }
 }

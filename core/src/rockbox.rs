@@ -2,12 +2,14 @@
 //! Rockbox Utility does, and removes them again. The install log
 //! (`.rockbox/rbutil.log`) stays readable by Rockbox Utility.
 
-use crate::{net, transfer};
+use crate::drive::{self, Drive, Key, RelPath, Scope};
+use crate::{net, paths};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 pub const TARGET: &str = "sansaclipplus";
 const MODEL_NUMBER: u32 = 66;
@@ -182,46 +184,56 @@ impl BuildInfo {
     }
 }
 
+/// The saved `build-info` and the ETag it came with, always written together.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct CachedInfo {
+    etag: Option<String>,
+    body: String,
+}
+
+const CACHE_FILE: &str = "build-info.json";
+static FETCH: Mutex<()> = Mutex::new(());
+
 /// Downloads `build-info`, revalidating the cached copy by ETag.
 pub fn fetch_build_info(agent: &ureq::Agent, cache: &Path) -> Result<BuildInfo, String> {
-    let body_file = cache.join("build-info");
-    let etag_file = cache.join("build-info.etag");
-    let cached = fs::read_to_string(&body_file).ok();
-    let etag = fs::read_to_string(&etag_file)
-        .ok()
-        .filter(|_| cached.is_some());
-    let mut request = agent.get(BUILD_INFO_URL);
-    if let Some(etag) = &etag {
-        request = request.header("If-None-Match", etag.trim());
+    fetch_build_info_from(agent, BUILD_INFO_URL, cache)
+}
+
+fn fetch_build_info_from(
+    agent: &ureq::Agent,
+    url: &str,
+    cache: &Path,
+) -> Result<BuildInfo, String> {
+    let _one_at_a_time = FETCH.lock().unwrap_or_else(|e| e.into_inner());
+    let file = cache.join(CACHE_FILE);
+    let cached: CachedInfo = paths::read_json(&file);
+    let have = !cached.body.is_empty();
+    let mut request = agent.get(url);
+    if let Some(etag) = cached.etag.as_ref().filter(|_| have) {
+        request = request.header("If-None-Match", etag);
     }
-    let mut response = request
-        .call()
-        .map_err(|e| format!("{BUILD_INFO_URL}: {e}"))?;
-    if response.status().as_u16() == 304
-        && let Some(text) = cached
-    {
-        return Ok(BuildInfo::parse(&text));
+    let mut response = request.call().map_err(|e| format!("{url}: {e}"))?;
+    if response.status().as_u16() == 304 && have {
+        return Ok(BuildInfo::parse(&cached.body));
     }
-    let new_etag = response
+    let etag = response
         .headers()
         .get("etag")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let text = response
+    let body = response
         .body_mut()
         .read_to_string()
-        .map_err(|e| format!("{BUILD_INFO_URL}: {e}"))?;
+        .map_err(|e| format!("{url}: {e}"))?;
     let _ = fs::create_dir_all(cache);
-    let _ = fs::write(&body_file, &text);
-    match new_etag {
-        Some(tag) => {
-            let _ = fs::write(&etag_file, tag);
-        }
-        None => {
-            let _ = fs::remove_file(&etag_file);
-        }
-    }
-    Ok(BuildInfo::parse(&text))
+    let _ = paths::write_json(
+        &file,
+        &CachedInfo {
+            etag,
+            body: body.clone(),
+        },
+    );
+    Ok(BuildInfo::parse(&body))
 }
 
 // Installed build --------------------------------------------------------------
@@ -419,40 +431,36 @@ impl RbLog {
         out
     }
 
-    fn load(root: &Path) -> Self {
-        fs::read(root.join(LOG_FILE))
+    fn load(drive: &Drive) -> Self {
+        fs::read(drive.root().join(LOG_FILE))
             .map(|bytes| Self::parse(&String::from_utf8_lossy(&bytes)))
             .unwrap_or_default()
     }
 
-    fn save(&self, root: &Path) -> Result<(), String> {
-        let path = root.join(LOG_FILE);
-        let temp = path.with_file_name(".rbutil.log.part");
-        let write = || -> io::Result<()> {
-            let mut file = File::create(&temp)?;
-            file.write_all(self.text().as_bytes())?;
-            file.sync_all()?;
-            fs::rename(&temp, &path)
-        };
-        write().map_err(|e| {
-            let _ = fs::remove_file(&temp);
-            format!("Could not write the install log: {e}")
-        })
+    fn save(&self, drive: &Drive) -> Result<(), String> {
+        let rel = RelPath::parse(LOG_FILE)?;
+        drive
+            .write(&rel, &mut self.text().as_bytes())
+            .map_err(|e| format!("Could not write the install log: {e}"))
     }
 
-    fn paths(&self, name: &str) -> Vec<String> {
+    /// The valid paths of a section. Entries that are not plain paths are skipped.
+    fn paths(&self, name: &str) -> Vec<RelPath> {
         self.sections
             .iter()
             .filter(|s| s.name == name)
-            .flat_map(|s| s.entries.iter().map(|(key, _)| decode_key(key)))
+            .flat_map(|s| s.entries.iter())
+            .filter_map(|(key, _)| RelPath::parse(&decode_key(key)).ok())
             .collect()
     }
 
-    fn paths_outside(&self, names: &[String]) -> HashSet<String> {
+    fn paths_outside(&self, names: &[String]) -> HashSet<Key> {
         self.sections
             .iter()
             .filter(|s| !names.contains(&s.name))
-            .flat_map(|s| s.entries.iter().map(|(key, _)| decode_key(key)))
+            .flat_map(|s| s.entries.iter())
+            .filter_map(|(key, _)| RelPath::parse(&decode_key(key)).ok())
+            .map(|p| p.key)
             .collect()
     }
 
@@ -469,10 +477,10 @@ impl RbLog {
     }
 
     /// Replaces the section, or adds it at the end.
-    fn set(&mut self, name: &str, files: &[String], label: &str) {
+    fn set(&mut self, name: &str, files: &[RelPath], label: &str) {
         let entries = files
             .iter()
-            .map(|path| (encode_key(path), encode_value(label)))
+            .map(|path| (encode_key(&path.text()), encode_value(label)))
             .collect();
         let section = LogSection {
             name: name.into(),
@@ -488,30 +496,26 @@ impl RbLog {
 
 // Zip install ---------------------------------------------------------------------
 
-/// A zip path as a safe relative path, or an error.
-fn safe_path(name: &str) -> Result<PathBuf, String> {
-    let name = name.replace('\\', "/");
-    let path = PathBuf::from(&name);
-    let safe = !name.is_empty()
-        && !name.contains(':')
-        && path.components().all(|c| matches!(c, Component::Normal(_)));
-    if safe {
-        Ok(path)
-    } else {
-        Err(format!("The download holds an unsafe path: {name}"))
-    }
+fn binary_key() -> Key {
+    Key::of(BINARY)
 }
 
-fn rel_string(path: &Path) -> String {
-    path.components()
-        .map(|c| c.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+/// The folders an install log section may change.
+fn scope_for(section: &str) -> Scope {
+    if section == "Fonts" {
+        drive::FONTS
+    } else if section.starts_with("Prerendered Voice") {
+        drive::VOICE
+    } else if section.starts_with("Theme: ") {
+        drive::THEME
+    } else {
+        drive::BUILD
+    }
 }
 
 struct Item {
     index: usize,
-    path: PathBuf,
+    rel: RelPath,
     size: u64,
 }
 
@@ -520,12 +524,15 @@ fn open_zip(path: &Path) -> Result<zip::ZipArchive<File>, String> {
     zip::ZipArchive::new(file).map_err(|e| format!("The download is not a zip file: {e}"))
 }
 
-fn plan(archive: &mut zip::ZipArchive<File>) -> Result<(Vec<Item>, u64), String> {
+/// Reads every entry to its end, so the zip crate checks each CRC, and
+/// checks names and sizes. Nothing on the player is touched.
+fn plan(archive: &mut zip::ZipArchive<File>, scope: Scope) -> Result<(Vec<Item>, u64), String> {
     let mut items = Vec::new();
+    let mut seen = HashSet::new();
     let mut total = 0u64;
     for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(|e| e.to_string())?;
-        let path = safe_path(&entry.name().map_err(|e| e.to_string())?)?;
+        let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
+        let name = entry.name().map_err(|e| e.to_string())?.into_owned();
         if entry.is_dir() {
             continue;
         }
@@ -533,18 +540,40 @@ fn plan(archive: &mut zip::ZipArchive<File>) -> Result<(Vec<Item>, u64), String>
         if kind != 0 && kind != 0o100000 {
             return Err("The download holds a special file".into());
         }
+        let rel = RelPath::parse(&name)?;
+        if !scope.allows(&rel.key) {
+            return Err(format!(
+                "The download holds a file it may not write: {name}"
+            ));
+        }
+        if !seen.insert(rel.key.clone()) {
+            return Err(format!("The download lists {name} twice"));
+        }
+        let size = entry.size();
         total = total
-            .checked_add(entry.size())
+            .checked_add(size)
             .filter(|n| *n <= MAX_UNPACKED)
             .ok_or("The download is too large")?;
-        items.push(Item {
-            index,
-            path,
-            size: entry.size(),
-        });
+        let mut bytes = Vec::new();
+        let is_binary = rel.key == binary_key();
+        let mut limited = (&mut entry).take(size + 1);
+        let read = if is_binary {
+            limited.read_to_end(&mut bytes).map(|n| n as u64)
+        } else {
+            io::copy(&mut limited, &mut io::sink())
+        }
+        .map_err(|e| format!("{name}: {e}"))?;
+        if read != size {
+            return Err(format!("{name} in the download is damaged"));
+        }
+        if is_binary {
+            check_binary(&bytes)?;
+        }
+        items.push(Item { index, rel, size });
     }
     // The boot file goes last, so a cut leaves the old one working.
-    items.sort_by_key(|item| rel_string(&item.path) == BINARY);
+    let binary = binary_key();
+    items.sort_by_key(|item| item.rel.key == binary);
     Ok((items, total))
 }
 
@@ -557,41 +586,17 @@ fn read_entry(archive: &mut zip::ZipArchive<File>, name: &str) -> Result<Vec<u8>
     Ok(bytes)
 }
 
-fn write_through_temp(dest: &Path, data: &mut dyn Read) -> io::Result<()> {
-    let name = dest
-        .file_name()
-        .map(|n| n.to_string_lossy())
-        .unwrap_or_default();
-    let temp = dest.with_file_name(format!(".{name}.part"));
-    let result = (|| {
-        let mut file = File::create(&temp)?;
-        io::copy(data, &mut file)?;
-        file.sync_all()?;
-        fs::rename(&temp, dest)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
-}
-
-fn sync_dir(dir: &Path) {
-    if let Ok(file) = File::open(dir) {
-        let _ = file.sync_all();
-    }
-}
-
-/// Extracts the whole zip into `root` and returns the file paths, relative
-/// and slash separated.
+/// Extracts the whole zip onto the drive and returns the files written.
 fn install_zip(
     zip_path: &Path,
-    root: &Path,
+    drive: &Drive,
+    scope: Scope,
     progress: &dyn Fn(&str),
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<RelPath>, String> {
     let mut archive = open_zip(zip_path)?;
-    let (items, total) = plan(&mut archive)?;
+    let (items, total) = plan(&mut archive, scope)?;
     let needed = total + SPACE_MARGIN;
-    if let Some(free) = transfer::free_space(root)
+    if let Some(free) = drive.free_space()
         && free < needed
     {
         return Err(format!(
@@ -607,104 +612,91 @@ fn install_zip(
         if n % step == 0 {
             progress(&format!("Copying files {n}/{}", items.len()));
         }
-        let dest = root.join(&item.path);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            dirs.insert(parent.to_path_buf());
-        }
-        let rel = rel_string(&item.path);
         let mut entry = archive.by_index(item.index).map_err(|e| e.to_string())?;
-        if rel == BINARY {
+        if item.rel.key == binary_key() {
             let mut bytes = Vec::with_capacity(usize::try_from(item.size).unwrap_or(0));
             entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
             check_binary(&bytes)?;
-            write_through_temp(&dest, &mut bytes.as_slice()).map_err(|e| e.to_string())?;
-            if fs::read(&dest).map_err(|e| e.to_string())? != bytes {
+            drive.write(&item.rel, &mut bytes.as_slice())?;
+            if fs::read(drive.path(&item.rel)).map_err(|e| e.to_string())? != bytes {
                 return Err("rockbox.sansa did not match after writing".into());
             }
         } else {
-            write_through_temp(&dest, &mut entry).map_err(|e| format!("{rel}: {e}"))?;
+            drive.write(&item.rel, &mut entry)?;
         }
-        files.push(rel);
+        if let Some(parent) = drive.path(&item.rel).parent() {
+            dirs.insert(parent.to_path_buf());
+        }
+        files.push(item.rel.clone());
     }
-    for dir in dirs.iter().chain([&root.to_path_buf()]) {
-        sync_dir(dir);
+    for dir in dirs.iter().chain([&drive.root().to_path_buf()]) {
+        drive.sync_dir(dir);
     }
     Ok(files)
 }
 
-fn tidy_dirs(root: &Path, files: &[String]) {
-    let mut dirs: Vec<PathBuf> = files
-        .iter()
-        .flat_map(|f| {
-            Path::new(f)
-                .ancestors()
-                .skip(1)
-                .filter(|a| !a.as_os_str().is_empty())
-                .map(Path::to_path_buf)
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
-    dirs.dedup();
-    for dir in dirs {
-        let _ = fs::remove_dir(root.join(dir));
-    }
-}
-
-/// Removes the files, then the folders they leave empty. Returns how many
-/// files were removed.
-fn delete_files(root: &Path, files: &[String]) -> usize {
+/// Removes the files, then the folders under `.rockbox` they leave empty.
+/// Returns how many files were removed.
+fn delete_files(drive: &Drive, files: &[RelPath]) -> Result<usize, String> {
     let mut removed = 0;
-    let mut safe = Vec::new();
+    let mut dirs = HashSet::new();
     for file in files {
-        let Ok(path) = safe_path(file) else { continue };
-        if fs::remove_file(root.join(&path)).is_ok() {
+        if drive.remove_file(file)? {
             removed += 1;
         }
-        safe.push(rel_string(&path));
+        for dir in file.path.ancestors().skip(1) {
+            if dir.components().count() >= 2 {
+                dirs.insert(dir.to_path_buf());
+            }
+        }
     }
-    tidy_dirs(root, &safe);
-    sync_dir(root);
-    removed
+    let mut dirs: Vec<PathBuf> = dirs.into_iter().collect();
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+    for dir in dirs {
+        drive.remove_dir(&dir)?;
+    }
+    drive.sync_dir(drive.root());
+    Ok(removed)
 }
 
-fn record(root: &Path, section: &str, files: &[String], label: &str) -> Result<(), String> {
-    let mut log = RbLog::load(root);
+/// Files the old install had that the new one lacks. Only paths the scope
+/// allows and no other section lists, compared by key.
+fn stale_files(
+    old: Vec<RelPath>,
+    new: &[RelPath],
+    others: &HashSet<Key>,
+    scope: Scope,
+) -> Vec<RelPath> {
+    let new: HashSet<&Key> = new.iter().map(|f| &f.key).collect();
+    old.into_iter()
+        .filter(|f| scope.allows(&f.key) && !new.contains(&f.key) && !others.contains(&f.key))
+        .collect()
+}
+
+fn record(drive: &Drive, section: &str, files: &[RelPath], label: &str) -> Result<(), String> {
+    let mut log = RbLog::load(drive);
     log.set(section, files, label);
-    log.save(root)
+    log.save(drive)
 }
 
 /// Installs a zip and records it. `replace_stale` also deletes files an
 /// earlier install of the same section had and this zip lacks.
 fn install_logged(
     zip_path: &Path,
-    root: &Path,
+    drive: &Drive,
     section: &str,
     label: &str,
     replace_stale: bool,
     progress: &dyn Fn(&str),
 ) -> Result<(), String> {
-    let old = RbLog::load(root).paths(section);
-    let files = install_zip(zip_path, root, progress)?;
+    let scope = scope_for(section);
+    let old = RbLog::load(drive).paths(section);
+    let files = install_zip(zip_path, drive, scope, progress)?;
     if replace_stale {
-        let new: HashSet<&String> = files.iter().collect();
-        let others = RbLog::load(root).paths_outside(&[section.to_string()]);
-        let stale: Vec<String> = old
-            .into_iter()
-            .filter(|f| !new.contains(f) && !others.contains(f))
-            .collect();
-        delete_files(root, &stale);
+        let others = RbLog::load(drive).paths_outside(&[section.to_string()]);
+        delete_files(drive, &stale_files(old, &files, &others, scope))?;
     }
-    record(root, section, &files, label)
-}
-
-fn require_drive(root: &Path) -> Result<(), String> {
-    if root.is_dir() {
-        Ok(())
-    } else {
-        Err("The player is not mounted".into())
-    }
+    record(drive, section, &files, label)
 }
 
 // Builds ------------------------------------------------------------------------------
@@ -728,12 +720,11 @@ fn verify_build(zip_path: &Path) -> Result<Info, String> {
 
 fn install_build_zip(
     zip_path: &Path,
-    root: &Path,
+    drive: &Drive,
     progress: &dyn Fn(&str),
 ) -> Result<String, String> {
-    require_drive(root)?;
     let info = verify_build(zip_path)?;
-    install_logged(zip_path, root, BASE_SECTION, &info.version, true, progress)?;
+    install_logged(zip_path, drive, BASE_SECTION, &info.version, true, progress)?;
     Ok(info.version)
 }
 
@@ -761,17 +752,16 @@ fn keep_zip(work: &Path, zip_path: &Path) -> io::Result<()> {
 pub fn install_build(
     agent: &ureq::Agent,
     work: &Path,
-    root: &Path,
+    drive: &Drive,
     build: &Build,
     progress: &dyn Fn(&str),
 ) -> Result<String, String> {
-    require_drive(root)?;
     fs::create_dir_all(work).map_err(|e| e.to_string())?;
     let part = work.join(PART);
     let _ = fs::remove_file(&part);
     progress(&format!("Downloading Rockbox {}", build.version));
     net::download_checked(agent, &build.url, &part)?;
-    let result = install_build_zip(&part, root, progress);
+    let result = install_build_zip(&part, drive, progress);
     match &result {
         Ok(_) => {
             if let Err(e) = keep_zip(work, &part) {
@@ -793,7 +783,7 @@ pub fn has_previous(work: &Path) -> bool {
 /// Installs the build that was on the host before the last update.
 pub fn install_previous(
     work: &Path,
-    root: &Path,
+    drive: &Drive,
     progress: &dyn Fn(&str),
 ) -> Result<String, String> {
     let zip_path = work.join(PREVIOUS);
@@ -801,7 +791,7 @@ pub fn install_previous(
         return Err("There is no earlier build to go back to".into());
     }
     progress("Installing the earlier build");
-    let version = install_build_zip(&zip_path, root, progress)?;
+    let version = install_build_zip(&zip_path, drive, progress)?;
     if let Err(e) = keep_zip(work, &zip_path) {
         eprintln!("clipplus-manager: could not swap builds: {e}");
     }
@@ -811,19 +801,18 @@ pub fn install_previous(
 fn install_download(
     agent: &ureq::Agent,
     work: &Path,
-    root: &Path,
+    drive: &Drive,
     url: &str,
     section: &str,
     label: &str,
     progress: &dyn Fn(&str),
 ) -> Result<(), String> {
-    require_drive(root)?;
     fs::create_dir_all(work).map_err(|e| e.to_string())?;
     let part = work.join(PART);
     let _ = fs::remove_file(&part);
     progress(&format!("Downloading {section}"));
     let result = net::download_checked(agent, url, &part)
-        .and_then(|_| install_logged(&part, root, section, label, false, progress));
+        .and_then(|_| install_logged(&part, drive, section, label, false, progress));
     let _ = fs::remove_file(&part);
     result
 }
@@ -831,14 +820,14 @@ fn install_download(
 pub fn install_fonts(
     agent: &ureq::Agent,
     work: &Path,
-    root: &Path,
+    drive: &Drive,
     build: &Build,
     progress: &dyn Fn(&str),
 ) -> Result<(), String> {
     install_download(
         agent,
         work,
-        root,
+        drive,
         &build.fonts_url,
         "Fonts",
         &build.version,
@@ -849,7 +838,7 @@ pub fn install_fonts(
 pub fn install_voice(
     agent: &ureq::Agent,
     work: &Path,
-    root: &Path,
+    drive: &Drive,
     info: &BuildInfo,
     build: &Build,
     language: &str,
@@ -857,7 +846,7 @@ pub fn install_voice(
 ) -> Result<(), String> {
     let url = info.voice_url(build.channel, language)?;
     let section = format!("Prerendered Voice ({language})");
-    install_download(agent, work, root, &url, &section, &build.version, progress)
+    install_download(agent, work, drive, &url, &section, &build.version, progress)
 }
 
 // Themes --------------------------------------------------------------------------------
@@ -948,7 +937,7 @@ pub fn list_themes(agent: &ureq::Agent, version: &str) -> Result<Vec<Theme>, Str
 pub fn install_theme(
     agent: &ureq::Agent,
     work: &Path,
-    root: &Path,
+    drive: &Drive,
     theme: &Theme,
     progress: &dyn Fn(&str),
 ) -> Result<(), String> {
@@ -956,7 +945,7 @@ pub fn install_theme(
     install_download(
         agent,
         work,
-        root,
+        drive,
         &theme.archive,
         &section,
         &theme.version,
@@ -966,40 +955,39 @@ pub fn install_theme(
 
 // Uninstall and settings ------------------------------------------------------------------
 
-/// Removes the listed sections: their files, unless another section also
-/// lists them, and the folders that end up empty. Returns the file count.
-pub fn uninstall_sections(root: &Path, sections: &[String]) -> Result<usize, String> {
-    let mut log = RbLog::load(root);
+/// Removes the listed sections: their files inside the folders the section
+/// may change, unless another section also lists them, and the folders that
+/// end up empty. Returns the file count.
+pub fn uninstall_sections(drive: &Drive, sections: &[String]) -> Result<usize, String> {
+    let mut log = RbLog::load(drive);
     let others = log.paths_outside(sections);
-    let files: Vec<String> = sections
+    let files: Vec<RelPath> = sections
         .iter()
-        .flat_map(|s| log.paths(s))
-        .filter(|f| !others.contains(f))
+        .flat_map(|s| {
+            let scope = scope_for(s);
+            log.paths(s)
+                .into_iter()
+                .filter(move |f| scope.allows(&f.key))
+        })
+        .filter(|f| !others.contains(&f.key))
         .collect();
-    let removed = delete_files(root, &files);
+    let removed = delete_files(drive, &files)?;
     for section in sections {
         log.remove(section);
     }
-    log.save(root)?;
+    log.save(drive)?;
     Ok(removed)
 }
 
 /// Smart uninstall of everything the log lists, except the bootloader entry.
 /// `full` removes the whole `.rockbox` folder, settings and database too.
-pub fn uninstall(root: &Path, full: bool) -> Result<usize, String> {
-    require_drive(root)?;
+pub fn uninstall(drive: &Drive, full: bool) -> Result<usize, String> {
     if full {
-        let dir = root.join(".rockbox");
-        let count = walk_count(&dir);
-        match fs::remove_dir_all(&dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.to_string()),
-        }
-        sync_dir(root);
+        let count = drive.remove_tree(Path::new(".rockbox"))?;
+        drive.sync_dir(drive.root());
         return Ok(count);
     }
-    let log = RbLog::load(root);
+    let log = RbLog::load(drive);
     let sections: Vec<String> = log
         .names()
         .into_iter()
@@ -1008,9 +996,10 @@ pub fn uninstall(root: &Path, full: bool) -> Result<usize, String> {
     if sections.is_empty() {
         return Err("There is no Rockbox install log on the player".into());
     }
-    uninstall_sections(root, &sections)
+    uninstall_sections(drive, &sections)
 }
 
+#[cfg(test)]
 fn walk_count(dir: &Path) -> usize {
     fs::read_dir(dir)
         .into_iter()
@@ -1060,19 +1049,19 @@ fn edit_setting(text: &str, key: &str, value: &str) -> String {
 }
 
 /// Turns the player's database auto update on or off in `config.cfg`.
-pub fn set_database_autoupdate(root: &Path, on: bool) -> Result<(), String> {
-    if !root.join(".rockbox").is_dir() {
+pub fn set_database_autoupdate(drive: &Drive, on: bool) -> Result<(), String> {
+    if !drive.root().join(".rockbox").is_dir() {
         return Err("Rockbox is not installed on the player".into());
     }
-    let path = root.join(CONFIG_FILE);
-    let text = match fs::read(&path) {
+    let rel = RelPath::parse(CONFIG_FILE)?;
+    let text = match fs::read(drive.path(&rel)) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.to_string()),
     };
     let edited = edit_setting(&text, "tagcache_autoupdate", if on { "on" } else { "off" });
-    write_through_temp(&path, &mut edited.as_bytes()).map_err(|e| e.to_string())?;
-    sync_dir(&root.join(".rockbox"));
+    drive.write(&rel, &mut edited.as_bytes())?;
+    drive.sync_dir(&drive.root().join(".rockbox"));
     Ok(())
 }
 
@@ -1087,6 +1076,7 @@ pub(crate) fn test_binary(payload: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
     use zip::write::SimpleFileOptions;
 
     const BUILD_INFO: &str = r#"[dailies]
@@ -1135,6 +1125,14 @@ sansaclipplus=4.0
     }
 
     fn none(_: &str) {}
+
+    fn rels(names: &[&str]) -> Vec<RelPath> {
+        names.iter().map(|n| RelPath::parse(n).unwrap()).collect()
+    }
+
+    fn texts(paths: &[RelPath]) -> Vec<String> {
+        paths.iter().map(RelPath::text).collect()
+    }
 
     #[test]
     fn resolves_the_three_channels() {
@@ -1247,7 +1245,7 @@ sansaclipplus=4.0
             ["Bootloader", "Rockbox (Base)", "Theme: Pure X3"]
         );
         assert_eq!(
-            log.paths(BASE_SECTION),
+            texts(&log.paths(BASE_SECTION)),
             [".rockbox/langs/english.lng", ".rockbox/wps/my theme/a.bmp"]
         );
         assert_eq!(log.text(), sample);
@@ -1255,18 +1253,15 @@ sansaclipplus=4.0
         let mut log = RbLog::default();
         log.set(
             BASE_SECTION,
-            &[
-                ".rockbox/rockbox.sansa".into(),
-                ".rockbox/wps/my theme/a.bmp".into(),
-            ],
+            &rels(&[".rockbox/rockbox.sansa", ".rockbox/wps/my theme/a.bmp"]),
             "f9fe698319-261114",
         );
         let text = log.text();
         assert!(text.contains("[Rockbox%20%28Base%29]\n"));
         assert!(text.contains(".rockbox\\wps\\my%20theme\\a.bmp=f9fe698319-261114\n"));
         assert_eq!(
-            RbLog::parse(&text).paths(BASE_SECTION),
-            log.paths(BASE_SECTION)
+            texts(&RbLog::parse(&text).paths(BASE_SECTION)),
+            texts(&log.paths(BASE_SECTION))
         );
         assert_eq!(encode_key("Theme: A&B"), "Theme%3A%20A%26B");
         assert_eq!(decode_key("a%20b%U00e9"), "a b\u{e9}");
@@ -1333,16 +1328,17 @@ about="Simple &lt;b&gt;"
 
     #[test]
     fn autoupdate_writes_config_cfg_on_the_drive() {
-        let drive = tempfile::tempdir().unwrap();
-        assert!(set_database_autoupdate(drive.path(), true).is_err());
-        fs::create_dir(drive.path().join(".rockbox")).unwrap();
-        set_database_autoupdate(drive.path(), true).unwrap();
-        let path = drive.path().join(CONFIG_FILE);
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
+        assert!(set_database_autoupdate(&drive, true).is_err());
+        fs::create_dir(dir.path().join(".rockbox")).unwrap();
+        set_database_autoupdate(&drive, true).unwrap();
+        let path = dir.path().join(CONFIG_FILE);
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "tagcache_autoupdate: on\r\n"
         );
-        set_database_autoupdate(drive.path(), false).unwrap();
+        set_database_autoupdate(&drive, false).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "tagcache_autoupdate: off\r\n"
@@ -1351,7 +1347,8 @@ about="Simple &lt;b&gt;"
 
     #[test]
     fn installs_a_build_and_logs_it() {
-        let drive = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
         let zip = build_zip(
             "f9fe698319-261114",
             &[
@@ -1359,34 +1356,34 @@ about="Simple &lt;b&gt;"
                 (".rockbox/wps/my theme/a.bmp", b"b"),
             ],
         );
-        let version = install_build_zip(zip.path(), drive.path(), &none).unwrap();
+        let version = install_build_zip(zip.path(), &drive, &none).unwrap();
         assert_eq!(version, "f9fe698319-261114");
         assert_eq!(
-            fs::read(drive.path().join(".rockbox/rocks/a.rock")).unwrap(),
+            fs::read(dir.path().join(".rockbox/rocks/a.rock")).unwrap(),
             b"a"
         );
-        assert!(crate::player::is_rockbox_volume(drive.path()));
-        let log = RbLog::load(drive.path());
+        assert!(crate::player::is_rockbox_volume(dir.path()));
+        let log = RbLog::load(&drive);
         assert_eq!(log.paths(BASE_SECTION).len(), 4);
         assert!(
-            log.paths(BASE_SECTION)
-                .contains(&".rockbox/wps/my theme/a.bmp".to_string())
+            texts(&log.paths(BASE_SECTION)).contains(&".rockbox/wps/my theme/a.bmp".to_string())
         );
         // Four files and the log, no temp files.
-        assert_eq!(walk_count(&drive.path().join(".rockbox")), 5);
+        assert_eq!(walk_count(&dir.path().join(".rockbox")), 5);
     }
 
     #[test]
     fn the_boot_file_is_written_last() {
         let zip = build_zip("v1", &[(".rockbox/a", b"a"), (".rockbox/b", b"b")]);
         let mut archive = open_zip(zip.path()).unwrap();
-        let (items, _) = plan(&mut archive).unwrap();
-        assert_eq!(rel_string(&items.last().unwrap().path), BINARY);
+        let (items, _) = plan(&mut archive, drive::BUILD).unwrap();
+        assert_eq!(items.last().unwrap().rel.text(), BINARY);
     }
 
     #[test]
     fn an_update_removes_stale_files_and_keeps_user_state() {
-        let drive = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
         let old = build_zip(
             "v1",
             &[
@@ -1394,9 +1391,9 @@ about="Simple &lt;b&gt;"
                 (".rockbox/rocks/keep.rock", b"k"),
             ],
         );
-        install_build_zip(old.path(), drive.path(), &none).unwrap();
-        fs::write(drive.path().join(".rockbox/config.cfg"), "volume: 1\r\n").unwrap();
-        fs::write(drive.path().join(".rockbox/rocks/mine.rock"), "m").unwrap();
+        install_build_zip(old.path(), &drive, &none).unwrap();
+        fs::write(dir.path().join(".rockbox/config.cfg"), "volume: 1\r\n").unwrap();
+        fs::write(dir.path().join(".rockbox/rocks/mine.rock"), "m").unwrap();
         let new = build_zip(
             "v2",
             &[
@@ -1404,8 +1401,8 @@ about="Simple &lt;b&gt;"
                 (".rockbox/codecs/new.codec", b"c"),
             ],
         );
-        install_build_zip(new.path(), drive.path(), &none).unwrap();
-        let rockbox = drive.path().join(".rockbox");
+        install_build_zip(new.path(), &drive, &none).unwrap();
+        let rockbox = dir.path().join(".rockbox");
         assert!(!rockbox.join("rocks/old.rock").exists());
         assert_eq!(fs::read(rockbox.join("rocks/keep.rock")).unwrap(), b"k2");
         assert!(rockbox.join("rocks/mine.rock").exists());
@@ -1413,45 +1410,45 @@ about="Simple &lt;b&gt;"
         assert!(rockbox.join("codecs/new.codec").exists());
         let info = parse_info(&fs::read_to_string(rockbox.join("rockbox-info.txt")).unwrap());
         assert_eq!(info.version, "v2");
-        assert!(
-            !RbLog::load(drive.path())
-                .paths(BASE_SECTION)
-                .contains(&".rockbox/rocks/old.rock".to_string())
-        );
+        let listed = texts(&RbLog::load(&drive).paths(BASE_SECTION));
+        assert!(!listed.contains(&".rockbox/rocks/old.rock".to_string()));
     }
 
     #[test]
     fn a_stale_file_that_another_section_owns_stays() {
-        let drive = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
         let fonts = make_zip(&[(".rockbox/fonts/x.fnt", b"f")]);
         let old = build_zip("v1", &[(".rockbox/fonts/x.fnt", b"f")]);
-        install_build_zip(old.path(), drive.path(), &none).unwrap();
-        install_logged(fonts.path(), drive.path(), "Fonts", "v1", false, &none).unwrap();
+        install_build_zip(old.path(), &drive, &none).unwrap();
+        install_logged(fonts.path(), &drive, "Fonts", "v1", false, &none).unwrap();
         let new = build_zip("v2", &[]);
-        install_build_zip(new.path(), drive.path(), &none).unwrap();
-        assert!(drive.path().join(".rockbox/fonts/x.fnt").exists());
+        install_build_zip(new.path(), &drive, &none).unwrap();
+        assert!(dir.path().join(".rockbox/fonts/x.fnt").exists());
     }
 
     #[test]
     fn rejects_unsafe_paths_before_writing_anything() {
         for name in ["../evil", "/etc/evil", ".rockbox/../../evil", "C:/evil"] {
-            let drive = tempfile::tempdir().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let drive = Drive::for_test(dir.path());
             let zip = build_zip("v1", &[(name, b"x")]);
-            let err = install_build_zip(zip.path(), drive.path(), &none).unwrap_err();
+            let err = install_build_zip(zip.path(), &drive, &none).unwrap_err();
             assert!(err.contains("unsafe path"), "{name}: {err}");
-            assert_eq!(walk_count(drive.path()), 0, "{name}");
+            assert_eq!(walk_count(dir.path()), 0, "{name}");
         }
     }
 
     #[test]
     fn rejects_a_wrong_target_or_a_bad_boot_file() {
-        let drive = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
         let binary = test_binary(b"x");
         let other = make_zip(&[
             (BINARY, &binary),
             (INFO_FILE, b"Target: sansaclipv2\nVersion: v\n"),
         ]);
-        let err = install_build_zip(other.path(), drive.path(), &none).unwrap_err();
+        let err = install_build_zip(other.path(), &drive, &none).unwrap_err();
         assert!(err.contains("sansaclipv2"));
         let mut bad = binary.clone();
         bad[8] ^= 1;
@@ -1459,27 +1456,20 @@ about="Simple &lt;b&gt;"
             (BINARY, &bad),
             (INFO_FILE, b"Target: sansaclipplus\nVersion: v\n"),
         ]);
-        assert!(install_build_zip(corrupt.path(), drive.path(), &none).is_err());
+        assert!(install_build_zip(corrupt.path(), &drive, &none).is_err());
         let size = make_zip(&[
             (BINARY, &binary),
             (INFO_FILE, b"Target: sansaclipplus\nBinary size: 3\n"),
         ]);
-        assert!(install_build_zip(size.path(), drive.path(), &none).is_err());
-        assert!(install_build_zip(Path::new("/nonexistent.zip"), drive.path(), &none).is_err());
-        assert_eq!(walk_count(drive.path()), 0);
-    }
-
-    #[test]
-    fn needs_a_mounted_drive() {
-        let zip = build_zip("v1", &[]);
-        let err =
-            install_build_zip(zip.path(), Path::new("/nonexistent/drive"), &none).unwrap_err();
-        assert!(err.contains("not mounted"));
+        assert!(install_build_zip(size.path(), &drive, &none).is_err());
+        assert!(install_build_zip(Path::new("/nonexistent.zip"), &drive, &none).is_err());
+        assert_eq!(walk_count(dir.path()), 0);
     }
 
     #[test]
     fn smart_uninstall_keeps_shared_files_settings_and_the_bootloader() {
-        let drive = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
         let build = build_zip(
             "v1",
             &[
@@ -1487,37 +1477,38 @@ about="Simple &lt;b&gt;"
                 (".rockbox/wps/a/a.bmp", b"b"),
             ],
         );
-        install_build_zip(build.path(), drive.path(), &none).unwrap();
+        install_build_zip(build.path(), &drive, &none).unwrap();
         let theme = make_zip(&[
             (".rockbox/themes/t.cfg", b"c"),
             (".rockbox/fonts/x.fnt", b"f"),
         ]);
-        install_logged(theme.path(), drive.path(), "Theme: T", "1", false, &none).unwrap();
-        let mut log = RbLog::load(drive.path());
-        log.set(BOOTLOADER_SECTION, &["bootloader.sansa".into()], "2019");
-        log.save(drive.path()).unwrap();
-        let rockbox = drive.path().join(".rockbox");
+        install_logged(theme.path(), &drive, "Theme: T", "1", false, &none).unwrap();
+        let mut log = RbLog::load(&drive);
+        log.set(BOOTLOADER_SECTION, &rels(&["bootloader.sansa"]), "2019");
+        log.save(&drive).unwrap();
+        let rockbox = dir.path().join(".rockbox");
         fs::write(rockbox.join("config.cfg"), "volume: 1\r\n").unwrap();
 
-        uninstall_sections(drive.path(), &["Theme: T".to_string()]).unwrap();
+        uninstall_sections(&drive, &["Theme: T".to_string()]).unwrap();
         assert!(!rockbox.join("themes").exists());
         assert!(rockbox.join("fonts/x.fnt").exists());
 
-        uninstall(drive.path(), false).unwrap();
+        uninstall(&drive, false).unwrap();
         assert!(!rockbox.join("fonts").exists());
         assert!(!rockbox.join("wps").exists());
         assert!(!rockbox.join("rockbox.sansa").exists());
         assert!(rockbox.join("config.cfg").exists());
-        assert_eq!(RbLog::load(drive.path()).names(), ["Bootloader"]);
+        assert_eq!(RbLog::load(&drive).names(), ["Bootloader"]);
 
-        uninstall(drive.path(), true).unwrap();
+        uninstall(&drive, true).unwrap();
         assert!(!rockbox.exists());
     }
 
     #[test]
     fn keeps_the_last_two_builds_and_rolls_back() {
         let work = tempfile::tempdir().unwrap();
-        let drive = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
         assert!(!has_previous(work.path()));
         let first = build_zip("v1", &[]);
         let second = build_zip("v2", &[]);
@@ -1528,10 +1519,10 @@ about="Simple &lt;b&gt;"
         keep_zip(work.path(), &part).unwrap();
         assert!(has_previous(work.path()));
         assert!(!part.exists());
-        install_build_zip(&work.path().join(CURRENT), drive.path(), &none).unwrap();
-        let version = install_previous(work.path(), drive.path(), &none).unwrap();
+        install_build_zip(&work.path().join(CURRENT), &drive, &none).unwrap();
+        let version = install_previous(work.path(), &drive, &none).unwrap();
         assert_eq!(version, "v1");
-        let installed = fs::read_to_string(drive.path().join(INFO_FILE)).unwrap();
+        let installed = fs::read_to_string(dir.path().join(INFO_FILE)).unwrap();
         assert_eq!(parse_info(&installed).version, "v1");
         assert_eq!(
             verify_build(&work.path().join(PREVIOUS)).unwrap().version,
@@ -1549,12 +1540,336 @@ about="Simple &lt;b&gt;"
         println!("dev {} {}", dev.version, dev.url);
         let again = fetch_build_info(&agent, cache.path()).unwrap();
         assert_eq!(again.build(Channel::Dev).unwrap(), dev);
-        assert!(cache.path().join("build-info.etag").exists());
+        assert!(cache.path().join(CACHE_FILE).exists());
         for channel in [Channel::Daily, Channel::Release] {
             println!("{channel:?} {:?}", info.build(channel).unwrap());
         }
         let themes = list_themes(&agent, &dev.version).unwrap();
         println!("{} themes, first {:?}", themes.len(), themes.first());
         assert!(!themes.is_empty());
+    }
+
+    fn write_log(drive: &Drive, section: &str, files: &[&str]) {
+        let mut log = RbLog::load(drive);
+        log.set(section, &rels(files), "v0");
+        log.save(drive).unwrap();
+    }
+
+    #[test]
+    fn a_zip_cannot_write_outside_its_folders() {
+        for name in [
+            "Tracks/user.mp3",
+            "clppa.bin",
+            ".rockbox/config.cfg",
+            ".rockbox/fixed.cfg",
+            ".rockbox/.resume.cfg",
+            ".rockbox/.playlist_control",
+            ".rockbox/database_idx.tcd",
+            ".rockbox/rbutil.log",
+            ".rockbox/playlist_catalog/mine.m3u",
+            ".rockbox/most-recent.bmark",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let drive = Drive::for_test(dir.path());
+            let zip = build_zip("v1", &[(name, b"x")]);
+            let err = install_build_zip(zip.path(), &drive, &none).unwrap_err();
+            assert!(err.contains("may not write"), "{name}: {err}");
+            assert_eq!(walk_count(dir.path()), 0, "{name}");
+        }
+        for (section, name) in [
+            ("Fonts", ".rockbox/rocks/a.rock"),
+            ("Theme: T", ".rockbox/rocks/a.rock"),
+            ("Theme: T", "Tracks/a.mp3"),
+            ("Prerendered Voice (english)", ".rockbox/fonts/a.fnt"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let drive = Drive::for_test(dir.path());
+            let zip = make_zip(&[(name, b"x")]);
+            let err = install_logged(zip.path(), &drive, section, "v", false, &none).unwrap_err();
+            assert!(err.contains("may not write"), "{section} {name}: {err}");
+            assert_eq!(walk_count(dir.path()), 0, "{section} {name}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
+        let theme = make_zip(&[
+            (".rockbox/themes/t.cfg", b"c"),
+            (".rockbox/wps/t/a.bmp", b"b"),
+            (".rockbox/icons/i.bmp", b"i"),
+        ]);
+        install_logged(theme.path(), &drive, "Theme: T", "1", false, &none).unwrap();
+    }
+
+    #[test]
+    fn stale_deletion_and_uninstall_stay_inside_their_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
+        for file in [
+            "Tracks/user.mp3",
+            ".rockbox/config.cfg",
+            ".rockbox/database_idx.tcd",
+            ".rockbox/rocks/a.rock",
+        ] {
+            let path = dir.path().join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "keep").unwrap();
+        }
+        let hostile = [
+            "Tracks/user.mp3",
+            ".rockbox/config.cfg",
+            ".rockbox/database_idx.tcd",
+        ];
+        write_log(&drive, BASE_SECTION, &hostile);
+        write_log(
+            &drive,
+            "Theme: T",
+            &[".rockbox/rocks/a.rock", "Tracks/user.mp3"],
+        );
+        install_build_zip(build_zip("v2", &[]).path(), &drive, &none).unwrap();
+        for file in hostile {
+            assert!(dir.path().join(file).exists(), "{file} survived the update");
+        }
+        write_log(&drive, BASE_SECTION, &hostile);
+        uninstall(&drive, false).unwrap();
+        for file in hostile.iter().chain(&[".rockbox/rocks/a.rock"]) {
+            assert!(
+                dir.path().join(file).exists(),
+                "{file} survived the uninstall"
+            );
+        }
+    }
+
+    #[test]
+    fn paths_are_compared_by_vfat_rules() {
+        let old: Vec<RelPath> = [
+            ".rockbox/./rockbox.sansa",
+            ".ROCKBOX/ROCKBOX.SANSA",
+            ".rockbox/Rocks/Old.rock",
+        ]
+        .iter()
+        .filter_map(|name| RelPath::parse(name).ok())
+        .collect();
+        // The first entry is not a path, so it is dropped when the log is read.
+        assert_eq!(old.len(), 2);
+        let new = rels(&[".rockbox/rockbox.sansa", ".rockbox/rocks/keep.rock"]);
+        let stale = stale_files(old, &new, &HashSet::new(), drive::BUILD);
+        assert_eq!(texts(&stale), [".rockbox/Rocks/Old.rock"]);
+
+        let owned: HashSet<Key> = rels(&[".ROCKBOX/ROCKBOX/X.FNT"])
+            .into_iter()
+            .map(|p| p.key)
+            .collect();
+        let stale = stale_files(rels(&[".rockbox/rockbox/x.fnt"]), &[], &owned, drive::BUILD);
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn log_entries_with_dots_do_not_reach_the_boot_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
+        let log =
+            "[Rockbox%20%28Base%29]\n.rockbox\\.\\rockbox.sansa=v0\n.ROCKBOX\\ROCKBOX.SANSA=v0\n\n";
+        fs::create_dir_all(dir.path().join(".rockbox")).unwrap();
+        fs::write(dir.path().join(LOG_FILE), log).unwrap();
+        install_build_zip(build_zip("v2", &[]).path(), &drive, &none).unwrap();
+        assert!(crate::player::is_rockbox_volume(dir.path()));
+    }
+
+    #[test]
+    fn duplicate_names_and_the_boot_file_order_follow_vfat_rules() {
+        let zip = build_zip("v1", &[(".rockbox/A", b"1"), (".rockbox/a", b"2")]);
+        let err = install_build_zip(
+            zip.path(),
+            &Drive::for_test(tempfile::tempdir().unwrap().path()),
+            &none,
+        );
+        assert!(err.unwrap_err().contains("twice"));
+
+        let binary = test_binary(b"v1");
+        let info = format!(
+            "Target: sansaclipplus\nVersion: v1\nBinary size: {}\n",
+            binary.len()
+        );
+        let zip = make_zip(&[
+            (".ROCKBOX/ROCKBOX.SANSA", &binary),
+            (INFO_FILE, info.as_bytes()),
+            (".rockbox/a", b"a"),
+        ]);
+        let mut archive = open_zip(zip.path()).unwrap();
+        let (items, _) = plan(&mut archive, drive::BUILD).unwrap();
+        assert_eq!(items.last().unwrap().rel.text(), ".ROCKBOX/ROCKBOX.SANSA");
+    }
+
+    #[test]
+    fn a_bad_checksum_late_in_the_zip_changes_nothing() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let stored =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let binary = test_binary(b"v1");
+        let info = format!(
+            "Target: sansaclipplus\nVersion: v1\nBinary size: {}\n",
+            binary.len()
+        );
+        let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
+        for (name, data) in [
+            (BINARY, binary.as_slice()),
+            (INFO_FILE, info.as_bytes()),
+            (".rockbox/rocks/a.rock", b"AAAAAAAA"),
+            (".rockbox/rocks/z.rock", b"ZZZZZZZZ-marker"),
+        ] {
+            zip.start_file(name, stored).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap();
+        let mut bytes = fs::read(file.path()).unwrap();
+        let at = bytes
+            .windows(15)
+            .position(|w| w == b"ZZZZZZZZ-marker")
+            .unwrap();
+        bytes[at] ^= 1;
+        fs::write(file.path(), bytes).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
+        let err = install_build_zip(file.path(), &drive, &none).unwrap_err();
+        assert!(err.contains("z.rock"), "{err}");
+        assert_eq!(walk_count(dir.path()), 0);
+    }
+
+    #[test]
+    fn a_job_stops_when_the_volume_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = Drive::for_test(dir.path());
+        install_build_zip(build_zip("v1", &[]).path(), &drive, &none).unwrap();
+        let new = build_zip("v2", &[(".rockbox/a", b"a"), (".rockbox/b", b"b")]);
+        drive.fail_after(5);
+        assert!(install_build_zip(new.path(), &drive, &none).is_err());
+        let boot = fs::read(dir.path().join(BINARY)).unwrap();
+        assert_eq!(boot, test_binary(b"v1"));
+        assert!(!dir.path().join(".rockbox/.rockbox.sansa.part").exists());
+    }
+
+    /// Answers each request with what the handler returns: status, ETag, body.
+    fn serve(
+        handler: impl Fn(Option<String>, usize) -> (u16, Option<String>, String) + Send + 'static,
+    ) -> String {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/build-info", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (n, stream) in listener.incoming().enumerate() {
+                let Ok(mut stream) = stream else { return };
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(k) => request.extend_from_slice(&buf[..k]),
+                    }
+                }
+                let text = String::from_utf8_lossy(&request).into_owned();
+                let none_match = text.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("if-none-match")
+                        .then(|| value.trim().to_string())
+                });
+                let (status, etag, body) = handler(none_match, n);
+                let body = if status == 304 { String::new() } else { body };
+                let reason = if status == 304 { "Not Modified" } else { "OK" };
+                let mut head = format!(
+                    "HTTP/1.1 {status} {reason}\r\nConnection: close\r\nContent-Length: {}\r\n",
+                    body.len()
+                );
+                if let Some(etag) = etag {
+                    head += &format!("ETag: {etag}\r\n");
+                }
+                let _ = stream.write_all(format!("{head}\r\n{body}").as_bytes());
+            }
+        });
+        url
+    }
+
+    fn info_with(hash: &str) -> String {
+        BUILD_INFO.replace("f9fe698319", hash)
+    }
+
+    fn cached_pair(cache: &Path) -> CachedInfo {
+        paths::read_json(&cache.join(CACHE_FILE))
+    }
+
+    #[test]
+    fn the_build_info_body_and_etag_are_one_record() {
+        let body = info_with("aaaaaaaaaa");
+        let served = body.clone();
+        let url = serve(move |none_match, _| match none_match.as_deref() {
+            Some("\"v1\"") => (304, None, String::new()),
+            _ => (200, Some("\"v1\"".into()), served.clone()),
+        });
+        let cache = tempfile::tempdir().unwrap();
+        let agent = net::agent();
+        for _ in 0..2 {
+            let info = fetch_build_info_from(&agent, &url, cache.path()).unwrap();
+            assert_eq!(info.build(Channel::Dev).unwrap().version, "aaaaaaaaaa");
+        }
+        let record = cached_pair(cache.path());
+        assert_eq!(record.etag.as_deref(), Some("\"v1\""));
+        assert_eq!(record.body, body);
+        let names: Vec<_> = fs::read_dir(cache.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names, [CACHE_FILE]);
+    }
+
+    #[test]
+    fn a_new_etag_never_pairs_with_the_old_body() {
+        let new_body = info_with("bbbbbbbbbb");
+        let served = new_body.clone();
+        let url = serve(move |_, _| (200, Some("\"v2\"".into()), served.clone()));
+        let cache = tempfile::tempdir().unwrap();
+        paths::write_json(
+            &cache.path().join(CACHE_FILE),
+            &CachedInfo {
+                etag: Some("\"v1\"".into()),
+                body: info_with("aaaaaaaaaa"),
+            },
+        )
+        .unwrap();
+        let info = fetch_build_info_from(&net::agent(), &url, cache.path()).unwrap();
+        assert_eq!(info.build(Channel::Dev).unwrap().version, "bbbbbbbbbb");
+        let record = cached_pair(cache.path());
+        assert_eq!(
+            (record.etag.as_deref(), record.body.as_str()),
+            (Some("\"v2\""), new_body.as_str())
+        );
+    }
+
+    #[test]
+    fn concurrent_fetches_leave_a_matching_record() {
+        let url = serve(|_, n| {
+            let (tag, hash) = if n % 2 == 0 {
+                ("\"v1\"", "aaaaaaaaaa")
+            } else {
+                ("\"v2\"", "bbbbbbbbbb")
+            };
+            (200, Some(tag.into()), info_with(hash))
+        });
+        let cache = tempfile::tempdir().unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..6 {
+                scope.spawn(|| {
+                    for _ in 0..3 {
+                        fetch_build_info_from(&net::agent(), &url, cache.path()).unwrap();
+                    }
+                });
+            }
+        });
+        let record = cached_pair(cache.path());
+        let hash = if record.etag.as_deref() == Some("\"v1\"") {
+            "aaaaaaaaaa"
+        } else {
+            "bbbbbbbbbb"
+        };
+        assert_eq!(record.body, info_with(hash));
     }
 }

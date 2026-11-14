@@ -7,6 +7,7 @@ use rustix::fs::statvfs;
 use rustix::net::netlink::{KOBJECT_UEVENT, SocketAddrNetlink};
 use rustix::net::{AddressFamily, RecvFlags, SocketType, bind, recv, socket};
 use std::fs;
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 
 const USB_ID: &str = "0781";
@@ -136,25 +137,36 @@ fn usb_event(message: &[u8]) -> Option<(bool, &str)> {
     (usb && device && (action == "add" || action == "remove")).then_some((action == "remove", id))
 }
 
-fn watch_usb(sysfs: &Path, mut on_change: impl FnMut(bool)) {
-    let mut last = mtp_present(sysfs, None);
-    on_change(last);
+fn open_uevents() -> rustix::io::Result<OwnedFd> {
     let fd = socket(
         AddressFamily::NETLINK,
         SocketType::DGRAM,
         Some(KOBJECT_UEVENT),
-    )
-    .and_then(|fd| bind(&fd, &SocketAddrNetlink::new(0, KERNEL_GROUP)).map(|()| fd));
-    let fd = match fd {
+    )?;
+    bind(&fd, &SocketAddrNetlink::new(0, KERNEL_GROUP))?;
+    Ok(fd)
+}
+
+/// Opens the event source before the first scan, so a plug between the two
+/// is read as an event and not lost.
+fn watch_usb(
+    open: impl FnOnce() -> rustix::io::Result<OwnedFd>,
+    mut scan: impl FnMut(Option<&str>) -> bool,
+    mut on_change: impl FnMut(bool),
+) {
+    let fd = match open() {
         Ok(fd) => fd,
         Err(e) => {
             eprintln!("clipplus-manager: usb watch: {e}");
             return;
         }
     };
+    let mut last = scan(None);
+    on_change(last);
     let mut buf = vec![0u8; 8192];
     loop {
         let skip = match recv(&fd, &mut buf, RecvFlags::empty()) {
+            Ok((0, _)) => return,
             Ok((n, _)) => match usb_event(&buf[..n.min(buf.len())]) {
                 Some((true, id)) => Some(id.to_string()),
                 Some((false, _)) => None,
@@ -167,7 +179,7 @@ fn watch_usb(sysfs: &Path, mut on_change: impl FnMut(bool)) {
                 return;
             }
         };
-        let now = mtp_present(sysfs, skip.as_deref());
+        let now = scan(skip.as_deref());
         if now != last {
             last = now;
             on_change(now);
@@ -180,7 +192,13 @@ fn watch_usb(sysfs: &Path, mut on_change: impl FnMut(bool)) {
 pub fn watch_mtp(on_change: impl FnMut(bool) + Send + 'static) {
     let _ = std::thread::Builder::new()
         .name("usb-watch".into())
-        .spawn(move || watch_usb(Path::new(SYSFS_USB), on_change));
+        .spawn(move || {
+            watch_usb(
+                open_uevents,
+                |skip| mtp_present(Path::new(SYSFS_USB), skip),
+                on_change,
+            )
+        });
 }
 
 #[cfg(test)]
@@ -216,6 +234,45 @@ mod tests {
         assert_eq!(usb_event(block), None);
         let change = b"change@/devices/usb1/1-3\0ACTION=change\0DEVPATH=/devices/usb1/1-3\0SUBSYSTEM=usb\0DEVTYPE=usb_device\0";
         assert_eq!(usb_event(change), None);
+    }
+
+    #[test]
+    fn a_plug_during_the_first_scan_is_not_lost() {
+        use rustix::net::{SendFlags, SocketFlags, send, socketpair};
+        use std::cell::RefCell;
+        let (reader, sender) = socketpair(
+            AddressFamily::UNIX,
+            SocketType::SEQPACKET,
+            SocketFlags::empty(),
+            None,
+        )
+        .unwrap();
+        let calls = RefCell::new(Vec::new());
+        let reports = RefCell::new(Vec::new());
+        let mut sender = Some(sender);
+        let mut scans = 0;
+        watch_usb(
+            || {
+                calls.borrow_mut().push("open");
+                Ok(reader)
+            },
+            |_| {
+                calls.borrow_mut().push("scan");
+                scans += 1;
+                if scans == 1 {
+                    // The player appears while the first scan runs.
+                    let event = b"add@/d/1-3\0ACTION=add\0DEVPATH=/d/1-3\0SUBSYSTEM=usb\0DEVTYPE=usb_device\0";
+                    let sender = sender.take().unwrap();
+                    send(&sender, event, SendFlags::empty()).unwrap();
+                    false
+                } else {
+                    true
+                }
+            },
+            |on| reports.borrow_mut().push(on),
+        );
+        assert_eq!(*calls.borrow(), ["open", "scan", "scan"]);
+        assert_eq!(*reports.borrow(), [false, true]);
     }
 
     fn rockbox_drive(root: &Path) {

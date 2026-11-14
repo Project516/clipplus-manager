@@ -15,6 +15,7 @@ const FILESYSTEM: &str = "org.freedesktop.UDisks2.Filesystem";
 const DRIVE: &str = "org.freedesktop.UDisks2.Drive";
 const LABEL: &str = "SANSA";
 const STOCK_LABEL: &str = "SANSA CLIPP";
+const SYSFS: &str = "/sys";
 
 pub type Properties = HashMap<String, OwnedValue>;
 pub type Objects = HashMap<OwnedObjectPath, HashMap<String, Properties>>;
@@ -46,7 +47,6 @@ enum Kind {
 struct DriveInfo {
     vendor: String,
     model: String,
-    usb: bool,
 }
 
 fn drive_info(objects: &Objects, block: &Properties) -> Option<DriveInfo> {
@@ -55,14 +55,37 @@ fn drive_info(objects: &Objects, block: &Properties) -> Option<DriveInfo> {
     Some(DriveInfo {
         vendor: string(drive, "Vendor").unwrap_or_default().trim().into(),
         model: string(drive, "Model").unwrap_or_default().trim().into(),
-        usb: string(drive, "ConnectionBus").is_some_and(|bus| bus == "usb"),
     })
+}
+
+/// The USB vendor and product id above a block device, from sysfs.
+fn usb_id(sysfs: &Path, block: &Properties) -> Option<(String, String)> {
+    let device = block
+        .get("Device")
+        .and_then(|v| Vec::<u8>::try_from(v.try_clone().ok()?).ok())?;
+    let name = bytes_to_path(&device).file_name()?.to_owned();
+    let top = std::fs::canonicalize(sysfs).ok()?;
+    let node = std::fs::canonicalize(sysfs.join("class/block").join(name)).ok()?;
+    node.ancestors()
+        .take_while(|dir| *dir != top)
+        .find_map(|dir| {
+            let read = |file: &str| std::fs::read_to_string(dir.join(file)).ok();
+            Some((
+                read("idVendor")?.trim().into(),
+                read("idProduct")?.trim().into(),
+            ))
+        })
+}
+
+fn is_clip_plus(sysfs: &Path, block: &Properties) -> bool {
+    usb_id(sysfs, block).is_some_and(|(vendor, product)| vendor == "0781" && product == "74d1")
 }
 
 fn classify(
     objects: &Objects,
     block: &Properties,
     mount: Option<&Path>,
+    sysfs: &Path,
     has_rockbox: &dyn Fn(&Path) -> bool,
 ) -> Option<Kind> {
     if string(block, "IdType")? != "vfat" {
@@ -70,7 +93,8 @@ fn classify(
     }
     let label = string(block, "IdLabel").unwrap_or_default();
     let drive = drive_info(objects, block);
-    if let Some(drive) = &drive {
+    let clip = is_clip_plus(sysfs, block);
+    if clip && let Some(drive) = &drive {
         let rockbox = drive.vendor.eq_ignore_ascii_case("Rockbox");
         if rockbox && drive.model.eq_ignore_ascii_case("Internal Storage") {
             return Some(Kind::Internal);
@@ -82,10 +106,7 @@ fn classify(
     if label.eq_ignore_ascii_case(LABEL) {
         return Some(Kind::Card);
     }
-    if !drive.is_some_and(|d| d.usb) {
-        return None;
-    }
-    if label.eq_ignore_ascii_case(STOCK_LABEL) || mount.is_some_and(has_rockbox) {
+    if clip && (label.eq_ignore_ascii_case(STOCK_LABEL) || mount.is_some_and(has_rockbox)) {
         return Some(Kind::Internal);
     }
     None
@@ -124,7 +145,11 @@ pub struct Volumes {
     pub internal: Option<CardInfo>,
 }
 
-fn volumes_of(objects: &Objects, has_rockbox: &dyn Fn(&Path) -> bool) -> Vec<(Kind, CardInfo)> {
+fn volumes_of(
+    objects: &Objects,
+    sysfs: &Path,
+    has_rockbox: &dyn Fn(&Path) -> bool,
+) -> Vec<(Kind, CardInfo)> {
     let mut found: Vec<(Kind, CardInfo)> = objects
         .iter()
         .filter_map(|(path, interfaces)| {
@@ -133,6 +158,7 @@ fn volumes_of(objects: &Objects, has_rockbox: &dyn Fn(&Path) -> bool) -> Vec<(Ki
                 objects,
                 interfaces.get(BLOCK)?,
                 info.mount.as_deref(),
+                sysfs,
                 has_rockbox,
             )?;
             Some((kind, info))
@@ -150,18 +176,26 @@ fn first(found: &[(Kind, CardInfo)], want: Kind) -> Option<CardInfo> {
 }
 
 /// The first vfat filesystem labeled SANSA, or on the "SD Card Slot" drive.
-pub fn find_card(objects: &Objects) -> Option<CardInfo> {
-    first(&volumes_of(objects, &|_| false), Kind::Card)
+pub fn find_card(objects: &Objects, sysfs: &Path) -> Option<CardInfo> {
+    first(&volumes_of(objects, sysfs, &|_| false), Kind::Card)
 }
 
-/// The player's internal drive. Never matched by a label alone, except the
-/// stock firmware label on a USB drive.
-pub fn find_internal(objects: &Objects, has_rockbox: &dyn Fn(&Path) -> bool) -> Option<CardInfo> {
-    first(&volumes_of(objects, has_rockbox), Kind::Internal)
+/// The player's internal drive. It must sit on USB device 0781:74d1, and
+/// then the drive model, the stock label or the Rockbox files pick it.
+pub fn find_internal(
+    objects: &Objects,
+    sysfs: &Path,
+    has_rockbox: &dyn Fn(&Path) -> bool,
+) -> Option<CardInfo> {
+    first(&volumes_of(objects, sysfs, has_rockbox), Kind::Internal)
 }
 
-pub fn find_volumes(objects: &Objects, has_rockbox: &dyn Fn(&Path) -> bool) -> Volumes {
-    let found = volumes_of(objects, has_rockbox);
+pub fn find_volumes(
+    objects: &Objects,
+    sysfs: &Path,
+    has_rockbox: &dyn Fn(&Path) -> bool,
+) -> Volumes {
+    let found = volumes_of(objects, sysfs, has_rockbox);
     Volumes {
         card: first(&found, Kind::Card),
         internal: first(&found, Kind::Internal),
@@ -196,7 +230,11 @@ impl Udisks {
     pub fn scan(&self) -> Result<Volumes, String> {
         let manager = self.proxy(ROOT, "org.freedesktop.DBus.ObjectManager")?;
         let objects: Objects = manager.call("GetManagedObjects", &()).map_err(describe)?;
-        Ok(find_volumes(&objects, &crate::player::is_rockbox_volume))
+        Ok(find_volumes(
+            &objects,
+            Path::new(SYSFS),
+            &crate::player::is_rockbox_volume,
+        ))
     }
 
     /// Mounts the card when needed and returns where it is mounted.
@@ -379,10 +417,10 @@ mod tests {
 
     #[test]
     fn reports_the_same_card_after_a_scan_error() {
-        let card = find_card(&objects(vec![(
-            "/o/b1",
-            object("SANSA", "vfat", None, "/"),
-        )]));
+        let card = find_card(
+            &objects(vec![("/o/b1", object("SANSA", "vfat", None, "/"))]),
+            Path::new(NO_SYSFS),
+        );
         let mut last = None;
         let mut reports = Vec::new();
         let mut record = |result| reports.push(result);
@@ -412,7 +450,7 @@ mod tests {
                 ),
             ),
         ]);
-        let card = find_card(&all).unwrap();
+        let card = find_card(&all, Path::new(NO_SYSFS)).unwrap();
         assert_eq!(card.device, "/dev/sdb1");
         assert_eq!(card.mount, Some(PathBuf::from("/run/media/<user>/SANSA")));
         assert_eq!(
@@ -425,18 +463,18 @@ mod tests {
     #[test]
     fn unmounted_card_has_no_mount_point() {
         let all = objects(vec![("/o/b1", object("sansa", "vfat", None, "/"))]);
-        let card = find_card(&all).unwrap();
+        let card = find_card(&all, Path::new(NO_SYSFS)).unwrap();
         assert_eq!(card.mount, None);
         assert_eq!(card.drive, None);
     }
 
     const DRIVE_PATH: &str = "/org/freedesktop/UDisks2/drives/D";
+    const NO_SYSFS: &str = "/nonexistent-sysfs";
 
-    fn drive_object(vendor: &str, model: &str, bus: &str) -> HashMap<String, Properties> {
+    fn drive_object(vendor: &str, model: &str) -> HashMap<String, Properties> {
         let mut drive = Properties::new();
         drive.insert("Vendor".into(), value(vendor));
         drive.insert("Model".into(), value(model));
-        drive.insert("ConnectionBus".into(), value(bus));
         HashMap::from([(DRIVE.to_string(), drive)])
     }
 
@@ -447,9 +485,26 @@ mod tests {
         mount: Option<&str>,
     ) -> Vec<(&'static str, HashMap<String, Properties>)> {
         vec![
-            (DRIVE_PATH, drive_object(vendor, model, "usb")),
+            (DRIVE_PATH, drive_object(vendor, model)),
             ("/o/b1", object(label, "vfat", mount, DRIVE_PATH)),
         ]
+    }
+
+    /// A sysfs tree where `sdb1` sits under a USB device with this id.
+    fn sysfs_with(vendor: &str, product: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let usb = dir.path().join("devices/usb1/1-3");
+        let node = usb.join("1-3:1.0/host6/target6:0:0/6:0:0:0/block/sdb/sdb1");
+        std::fs::create_dir_all(&node).unwrap();
+        std::fs::write(usb.join("idVendor"), format!("{vendor}\n")).unwrap();
+        std::fs::write(usb.join("idProduct"), format!("{product}\n")).unwrap();
+        std::fs::create_dir_all(dir.path().join("class/block")).unwrap();
+        std::os::unix::fs::symlink(&node, dir.path().join("class/block/sdb1")).unwrap();
+        dir
+    }
+
+    fn clip() -> tempfile::TempDir {
+        sysfs_with("0781", "74d1")
     }
 
     fn never(_: &Path) -> bool {
@@ -458,60 +513,101 @@ mod tests {
 
     #[test]
     fn rockbox_internal_drive_is_found_by_model_whatever_its_label() {
+        let sysfs = clip();
         for label in ["", "CLIPPLUS", "My Music"] {
             let all = objects(player("Rockbox", "Internal Storage", label, None));
-            let found = find_internal(&all, &never).unwrap();
+            let found = find_internal(&all, sysfs.path(), &never).unwrap();
             assert_eq!(found.drive.as_deref(), Some(DRIVE_PATH));
-            assert_eq!(find_card(&all), None);
+            assert_eq!(find_card(&all, sysfs.path()), None);
         }
     }
 
     #[test]
     fn rockbox_microsd_is_found_by_model() {
+        let sysfs = clip();
         let all = objects(player("Rockbox", "SD Card Slot", "Songs", None));
-        assert!(find_card(&all).is_some());
-        assert_eq!(find_internal(&all, &never), None);
+        assert!(find_card(&all, sysfs.path()).is_some());
+        assert_eq!(find_internal(&all, sysfs.path(), &never), None);
     }
 
     #[test]
-    fn the_stock_label_finds_the_internal_drive_on_usb_only() {
+    fn the_stock_label_finds_the_internal_drive() {
+        let sysfs = clip();
         let all = objects(player("SanDisk", "Sansa Clip+", "SANSA CLIPP", None));
-        assert!(find_internal(&all, &never).is_some());
-        assert_eq!(find_card(&all), None);
-        let mut internal_bus = player("SanDisk", "Disk", "SANSA CLIPP", None);
-        internal_bus[0].1 = drive_object("SanDisk", "Disk", "sdio");
-        assert_eq!(find_internal(&objects(internal_bus), &never), None);
+        assert!(find_internal(&all, sysfs.path(), &never).is_some());
+        assert_eq!(find_card(&all, sysfs.path()), None);
     }
 
     #[test]
-    fn a_mounted_usb_drive_counts_when_its_files_say_rockbox() {
+    fn a_mounted_clip_counts_when_its_files_say_rockbox() {
+        let sysfs = clip();
         let mount = "/run/media/<user>/Anything";
         let all = objects(player("Generic", "Flash", "Anything", Some(mount)));
-        assert_eq!(find_internal(&all, &never), None);
+        assert_eq!(find_internal(&all, sysfs.path(), &never), None);
         let seen = std::cell::RefCell::new(Vec::new());
         let by_files = |path: &Path| {
             seen.borrow_mut().push(path.to_path_buf());
             true
         };
-        let found = find_internal(&all, &by_files).unwrap();
+        let found = find_internal(&all, sysfs.path(), &by_files).unwrap();
         assert_eq!(found.mount, Some(PathBuf::from(mount)));
         assert_eq!(seen.borrow().as_slice(), [PathBuf::from(mount)]);
         let unmounted = objects(player("Generic", "Flash", "Anything", None));
-        assert_eq!(find_internal(&unmounted, &|_| true), None);
+        assert_eq!(find_internal(&unmounted, sysfs.path(), &|_| true), None);
+    }
+
+    #[test]
+    fn a_drive_that_is_not_a_clip_plus_is_never_the_internal_drive() {
+        let mount = "/run/media/<user>/Anything";
+        let rockbox_files = |_: &Path| true;
+        for sysfs in [
+            sysfs_with("0781", "74d0"),
+            sysfs_with("1234", "74d1"),
+            sysfs_with("0781", "5567"),
+        ] {
+            for (vendor, model, label, mounted) in [
+                ("Rockbox", "Internal Storage", "X", None),
+                ("SanDisk", "Disk", "SANSA CLIPP", None),
+                ("Generic", "Flash", "Anything", Some(mount)),
+            ] {
+                let all = objects(player(vendor, model, label, mounted));
+                assert_eq!(
+                    find_internal(&all, sysfs.path(), &rockbox_files),
+                    None,
+                    "{vendor} {model} {label}"
+                );
+            }
+        }
+        // No sysfs entry at all, such as an internal bus.
+        let all = objects(player("Rockbox", "Internal Storage", "X", Some(mount)));
+        assert_eq!(
+            find_internal(&all, Path::new(NO_SYSFS), &rockbox_files),
+            None
+        );
+    }
+
+    #[test]
+    fn the_sd_card_slot_model_needs_the_clip_plus_but_the_label_does_not() {
+        let other = sysfs_with("1234", "0001");
+        let slot = objects(player("Rockbox", "SD Card Slot", "Songs", None));
+        assert_eq!(find_card(&slot, other.path()), None);
+        let labeled = objects(player("Generic", "SD Reader", "SANSA", None));
+        assert!(find_card(&labeled, other.path()).is_some());
     }
 
     #[test]
     fn the_sansa_label_stays_a_card_and_both_volumes_are_reported() {
+        let sysfs = clip();
         let mut items = player("Rockbox", "Internal Storage", "X", None);
         items.push((
             "/org/freedesktop/UDisks2/drives/E",
-            drive_object("Generic", "SD Reader", "usb"),
+            drive_object("Generic", "SD Reader"),
         ));
         items.push((
             "/o/b2",
             object("SANSA", "vfat", None, "/org/freedesktop/UDisks2/drives/E"),
         ));
-        let volumes = find_volumes(&objects(items), &never);
+        let volumes = find_volumes(&objects(items), sysfs.path(), &never);
         assert!(volumes.internal.unwrap().block.ends_with("b1"));
         assert!(volumes.card.unwrap().block.ends_with("b2"));
     }
@@ -522,7 +618,7 @@ mod tests {
             ("/o/a", object("SANSA", "ext4", None, "/")),
             ("/o/b", object("MUSIC", "vfat", None, "/")),
         ]);
-        assert_eq!(find_card(&all), None);
-        assert_eq!(find_card(&Objects::new()), None);
+        assert_eq!(find_card(&all, Path::new(NO_SYSFS)), None);
+        assert_eq!(find_card(&Objects::new(), Path::new(NO_SYSFS)), None);
     }
 }
