@@ -124,6 +124,9 @@ pub mod qobject {
         unsafe fn end_reset_model(self: Pin<&mut Backend>);
 
         #[qsignal]
+        fn album_queued(self: Pin<&mut Backend>);
+
+        #[qsignal]
         fn raise_requested(self: Pin<&mut Backend>);
 
         #[qinvokable]
@@ -140,6 +143,15 @@ pub mod qobject {
 
         #[qinvokable]
         fn find_peers(self: Pin<&mut Backend>, index: i32);
+
+        #[qinvokable]
+        fn search_albums(self: Pin<&mut Backend>, query: &QString);
+
+        #[qinvokable]
+        fn cancel_album_search(self: &Backend);
+
+        #[qinvokable]
+        fn download_album(self: &Backend, index: i32);
 
         #[qinvokable]
         fn download_peer(self: &Backend, index: i32);
@@ -352,6 +364,7 @@ impl qobject::Backend {
                 self.as_mut().set_soulseek_ready(ready);
                 self.set_soulseek_status(QString::from(&text));
             }
+            UiEvent::AlbumQueued => self.album_queued(),
             UiEvent::PeerResults(rows) => {
                 let json = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into());
                 self.set_peer_results(QString::from(&json));
@@ -587,6 +600,27 @@ impl qobject::Backend {
             self.as_mut().set_peer_results(QString::from("[]"));
             self.as_mut().set_peer_searching(true);
             engine.search_peers(recording);
+        }
+    }
+
+    fn search_albums(mut self: Pin<&mut Self>, query: &QString) {
+        if let Some(engine) = self.engine().cloned() {
+            self.as_mut().set_peer_error(QString::default());
+            self.as_mut().set_peer_results(QString::from("[]"));
+            self.as_mut().set_peer_searching(true);
+            engine.search_albums(query.to_string());
+        }
+    }
+
+    fn cancel_album_search(&self) {
+        if let Some(engine) = self.engine() {
+            engine.cancel_album_search();
+        }
+    }
+
+    fn download_album(&self, index: i32) {
+        if let (Some(engine), Ok(index)) = (self.engine(), usize::try_from(index)) {
+            engine.download_album(index);
         }
     }
 

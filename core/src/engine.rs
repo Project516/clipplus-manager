@@ -80,6 +80,7 @@ pub enum UiEvent {
     PeerResults(Vec<PeerFile>),
     PeerError(String),
     PeerSearching(bool),
+    AlbumQueued,
     /// The player, its drives and the firmware on it.
     Player(PlayerState),
     /// Progress or result text of a Rockbox action. `busy` is true while one runs.
@@ -129,6 +130,11 @@ enum Msg {
     SoulseekStarted(Result<Arc<Slskd>, String>),
     SoulseekExited(Arc<Slskd>),
     SearchPeers(Recording),
+    SearchAlbums(String),
+    CancelAlbumSearch,
+    AlbumFound(u64, Result<Vec<PeerFile>, String>),
+    DownloadAlbum(usize),
+    AlbumFiles(u64, Result<Vec<PeerFile>, String>),
     PeersFound(u64, Result<Vec<PeerFile>, String>),
     DownloadPeer(usize),
     SoulseekQueued {
@@ -296,6 +302,15 @@ impl Engine {
     }
     pub fn search_peers(&self, recording: Recording) {
         let _ = self.tx.send(Msg::SearchPeers(recording));
+    }
+    pub fn search_albums(&self, query: String) {
+        let _ = self.tx.send(Msg::SearchAlbums(query));
+    }
+    pub fn cancel_album_search(&self) {
+        let _ = self.tx.send(Msg::CancelAlbumSearch);
+    }
+    pub fn download_album(&self, index: usize) {
+        let _ = self.tx.send(Msg::DownloadAlbum(index));
     }
     pub fn download_peer(&self, index: usize) {
         let _ = self.tx.send(Msg::DownloadPeer(index));
@@ -489,6 +504,7 @@ struct Core {
     selected_recording: Option<Recording>,
     peer_results: Vec<PeerFile>,
     peer_generation: u64,
+    album_browsing: bool,
     internal: Option<CardInfo>,
     internal_mounting: bool,
     internal_mount_failed: bool,
@@ -661,6 +677,7 @@ fn build_core(
         selected_recording: None,
         peer_results: Vec::new(),
         peer_generation: 0,
+        album_browsing: false,
         internal: None,
         internal_mounting: false,
         internal_mount_failed: false,
@@ -984,7 +1001,91 @@ impl Core {
                     });
                 }
             }
+            Msg::CancelAlbumSearch => {
+                self.peer_generation += 1;
+                self.album_browsing = false;
+                (self.emit)(UiEvent::PeerSearching(false));
+            }
+            Msg::SearchAlbums(query) => {
+                self.album_browsing = false;
+                self.peer_generation += 1;
+                let generation = self.peer_generation;
+                self.peer_results.clear();
+                self.selected_recording = None;
+                (self.emit)(UiEvent::PeerResults(Vec::new()));
+                (self.emit)(UiEvent::PeerError(String::new()));
+                let Some(client) = self.soulseek.clone() else {
+                    (self.emit)(UiEvent::PeerSearching(false));
+                    (self.emit)(UiEvent::PeerError("Connect to Soulseek first".into()));
+                    return;
+                };
+                (self.emit)(UiEvent::PeerSearching(true));
+                let tx = self.tx.clone();
+                spawn("soulseek-album-search", move || {
+                    let result = client.search(&query).map(crate::slskd::album_candidates);
+                    let _ = tx.send(Msg::AlbumFound(generation, result));
+                });
+            }
+            Msg::AlbumFound(generation, result) if generation == self.peer_generation => {
+                (self.emit)(UiEvent::PeerSearching(false));
+                match result {
+                    Ok(folders) => {
+                        self.peer_results = folders;
+                        (self.emit)(UiEvent::PeerResults(self.peer_results.clone()));
+                    }
+                    Err(error) => (self.emit)(UiEvent::PeerError(error)),
+                }
+            }
+            Msg::AlbumFound(..) => {}
+            Msg::DownloadAlbum(index) => {
+                if self.album_browsing {
+                    return;
+                }
+                if let (Some(folder), Some(client)) =
+                    (self.peer_results.get(index).cloned(), self.soulseek.clone())
+                {
+                    let generation = self.peer_generation;
+                    self.album_browsing = true;
+                    (self.emit)(UiEvent::PeerError(String::new()));
+                    (self.emit)(UiEvent::PeerSearching(true));
+                    let tx = self.tx.clone();
+                    spawn("soulseek-album-directory", move || {
+                        let result = client.directory(&folder.username, &folder.filename);
+                        let _ = tx.send(Msg::AlbumFiles(generation, result));
+                    });
+                }
+            }
+            Msg::AlbumFiles(generation, result) if generation == self.peer_generation => {
+                self.album_browsing = false;
+                (self.emit)(UiEvent::PeerSearching(false));
+                match result {
+                    Ok(files) => {
+                        for peer in files {
+                            let mut job = Job::new(self.next_id, String::new());
+                            self.next_id += 1;
+                            job.title = peer
+                                .filename
+                                .rsplit(['\\', '/'])
+                                .next()
+                                .unwrap_or(&peer.filename)
+                                .to_string();
+                            job.found = true;
+                            job.stage = Stage::Waiting;
+                            job.soulseek = Some(queue::SoulseekJob {
+                                peer,
+                                transfer: None,
+                            });
+                            self.jobs.push(job);
+                        }
+                        self.show_all();
+                        (self.emit)(UiEvent::AlbumQueued);
+                    }
+                    Err(error) => (self.emit)(UiEvent::PeerError(error)),
+                }
+            }
+            Msg::AlbumFiles(..) => {}
             Msg::SearchPeers(recording) => {
+                self.album_browsing = false;
                 self.peer_generation += 1;
                 let generation = self.peer_generation;
                 self.peer_results.clear();

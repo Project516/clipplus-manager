@@ -11,7 +11,7 @@ ClipPlus Manager is a small KDE app that turns links into songs for a SanDisk Sa
 - Copies the songs into `Tracks/` on the card, checks each copy byte by byte, then deletes the local file. It never overwrites or deletes a file on the card that it did not just write.
 - Shows "Safe to unplug the Sansa" after you press Eject.
 - Keeps yt-dlp, ffmpeg and deno current on its own, and updates itself.
-- Searches MusicBrainz recordings and downloads a chosen file from Soulseek, using the recording's title, artist and album tags.
+- Searches MusicBrainz recordings and Soulseek album folders, then downloads the chosen music.
 
 ## Install
 
@@ -33,7 +33,7 @@ The app updates itself once a day. After an update it asks you to restart.
 
 Paste one or more links into the field and press Enter or Add. You can also drop links on the window. The field clears at once, so you can paste the next link right away.
 
-To search by artist or song, choose **Find music** and select a recording and an available file. The app installs and updates slskd automatically. The first time, it makes a Soulseek account with a random name and saves it in `~/.config/clipplus-manager/soulseek.json`; put your own `username` and `password` there to use your account instead. Queued Soulseek downloads resume when the app starts.
+To find a song, choose **Find music** and select a recording and an available file. To download an album, choose **Album**, search for the artist and album, and select a peer folder. The app installs and updates slskd automatically. The first time, it makes a Soulseek account with a random name and saves it in `~/.config/clipplus-manager/soulseek.json`; put your own `username` and `password` there to use your account instead. Queued Soulseek downloads resume when the app starts.
 
 ```
 ./clipplus-manager-<version>-x86_64.AppImage <link>...   add links to the running window, or start the app with them
