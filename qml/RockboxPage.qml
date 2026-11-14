@@ -148,7 +148,7 @@ Kirigami.ScrollablePage {
 
         Kirigami.InlineMessage {
             Layout.fillWidth: true
-            visible: page.backend.bootloaderPending && page.installed && !page.flowActive && !page.backend.rockboxBusy
+            visible: page.backend.bootloaderPending && !page.flowActive && !page.backend.rockboxBusy
             showCloseButton: false
             type: Kirigami.MessageType.Warning
             text: "Eject the player, then unplug it so it can flash the bootloader."

@@ -47,6 +47,7 @@ pub mod qobject {
         #[qproperty(QString, firmware_version)]
         #[qproperty(bool, bootloader_pending)]
         #[qproperty(bool, flash_pending)]
+        #[qproperty(QString, flash_kind)]
         #[qproperty(bool, rockbox_busy)]
         #[qproperty(bool, rockbox_failed)]
         #[qproperty(QString, rockbox_status)]
@@ -262,6 +263,7 @@ pub struct BackendRust {
     firmware_version: QString,
     bootloader_pending: bool,
     flash_pending: bool,
+    flash_kind: QString,
     rockbox_busy: bool,
     rockbox_failed: bool,
     rockbox_status: QString,
@@ -366,7 +368,13 @@ impl qobject::Backend {
                 self.set_rockbox_status(QString::from(&text));
             }
             UiEvent::RockboxChannel(channel) => {
-                self.set_rockbox_channel(QString::from(channel_key(channel)));
+                let key = QString::from(channel_key(channel));
+                if *self.rockbox_channel() != key {
+                    // The old channel's build says nothing about the new one.
+                    self.as_mut().set_rockbox_latest(QString::default());
+                    self.as_mut().set_rockbox_update_available(false);
+                }
+                self.set_rockbox_channel(key);
             }
             UiEvent::RockboxLatest {
                 version,
@@ -386,6 +394,7 @@ impl qobject::Backend {
                 self.set_database_auto_update_known(value.is_some());
             }
             UiEvent::FlashPending(on) => self.set_flash_pending(on),
+            UiEvent::FlashKind(kind) => self.set_flash_kind(QString::from(kind)),
             UiEvent::RockboxFailed(failed) => self.set_rockbox_failed(failed),
             UiEvent::SongsCopied => self.set_songs_copied(true),
             UiEvent::RockboxPhase(phase) => self.set_rockbox_phase(QString::from(phase)),

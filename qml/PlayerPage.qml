@@ -87,7 +87,7 @@ Kirigami.ScrollablePage {
             visible: page.backend.flashPending
             showCloseButton: false
             type: Kirigami.MessageType.Warning
-            text: "Unplug the player now. It flashes and powers off by itself in about a minute. Do not touch it."
+            text: page.backend.flashKind === "restore" ? "Unplug the player. Then turn it on while holding Left (|<<), so the stock firmware starts and flashes the file. After that, remove the Rockbox files on the Rockbox page." : "Unplug the player now. It flashes the bootloader and powers off by itself in about a minute. Do not touch it."
         }
 
         Kirigami.InlineMessage {

@@ -94,6 +94,8 @@ fn protected(parts: &[String]) -> bool {
     matches!(
         name.as_str(),
         "config.cfg"
+            | "config.cfg.new"
+            | "config.cfg.old"
             | "fixed.cfg"
             | ".resume.cfg"
             | ".playlist_control"
