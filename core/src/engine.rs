@@ -2713,8 +2713,14 @@ mod tests {
     fn first_install_writes_the_build_before_the_bootloader() {
         let order = std::cell::RefCell::new(Vec::new());
         let text = first_install(
-            || Ok(order.borrow_mut().push("build")),
-            || Ok(order.borrow_mut().push("bootloader")),
+            || {
+                order.borrow_mut().push("build");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("bootloader");
+                Ok(())
+            },
         )
         .unwrap();
         assert_eq!(*order.borrow(), ["build", "bootloader"]);
@@ -2723,7 +2729,10 @@ mod tests {
         let order = std::cell::RefCell::new(Vec::new());
         let result = first_install(
             || Err("no network".into()),
-            || Ok(order.borrow_mut().push("bootloader")),
+            || {
+                order.borrow_mut().push("bootloader");
+                Ok(())
+            },
         );
         assert!(result.is_err() && order.borrow().is_empty());
     }
