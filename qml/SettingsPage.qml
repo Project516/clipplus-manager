@@ -31,6 +31,11 @@ Kirigami.ScrollablePage {
         PageSection {
             title: "App updates"
 
+            Controls.Label {
+                Layout.fillWidth: true
+                text: "Version " + page.backend.appVersion()
+            }
+
             Kirigami.InlineMessage {
                 Layout.fillWidth: true
                 visible: page.backend.updatedVersion !== ""
