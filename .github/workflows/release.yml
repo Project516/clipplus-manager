@@ -2,8 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [master]
-  workflow_dispatch:
+    tags: ['v*']
 
 concurrency:
   group: release
@@ -14,7 +13,6 @@ permissions:
 
 jobs:
   version:
-    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -22,22 +20,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: version
         run: |
-          base=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*"/\1/p' Cargo.toml | head -1)
-          if [[ ! "$base" =~ ^[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Could not read a major.minor version from Cargo.toml"
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag must be a version like v1.2.3"
             exit 1
           fi
-          echo "version=$base.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
-    if: github.ref == 'refs/heads/master'
     needs: version
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ needs.version.outputs.version }}
 
   release:
-    if: github.ref == 'refs/heads/master'
     needs: [version, build]
     runs-on: ubuntu-latest
     permissions:
@@ -57,7 +53,7 @@ jobs:
 
       - name: Create the release
         run: |
-          previous=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$GITHUB_SHA^" 2>/dev/null || true)
           if [ -n "$previous" ]; then range="$previous..HEAD"; else range="HEAD"; fi
           git log "$range" --no-merges --format='- %s' > notes.md
           gh release create "v$VERSION" dist/*.AppImage dist/*.AppImage.sha256 \
