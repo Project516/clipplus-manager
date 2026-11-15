@@ -142,6 +142,9 @@ pub mod qobject {
         fn check_updates(self: &Backend);
 
         #[qinvokable]
+        fn app_version(self: &Backend) -> QString;
+
+        #[qinvokable]
         fn find_peers(self: Pin<&mut Backend>, index: i32);
 
         #[qinvokable]
@@ -591,6 +594,10 @@ impl qobject::Backend {
         if let Some(engine) = self.engine() {
             engine.check_updates();
         }
+    }
+
+    fn app_version(&self) -> QString {
+        QString::from(clipplus_manager_core::selfupdate::CURRENT)
     }
 
     fn find_peers(mut self: Pin<&mut Self>, index: i32) {
