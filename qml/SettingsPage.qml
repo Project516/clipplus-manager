@@ -29,7 +29,7 @@ Kirigami.ScrollablePage {
         }
 
         PageSection {
-            title: "App updates"
+            title: "Updates"
 
             Kirigami.InlineMessage {
                 Layout.fillWidth: true
@@ -79,7 +79,7 @@ Kirigami.ScrollablePage {
                 Controls.Label {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
-                    text: "Look for a newer version of the app."
+                    text: "Check for updates to the app and managed tools."
                 }
                 Controls.BusyIndicator {
                     running: page.backend.checkingUpdates
