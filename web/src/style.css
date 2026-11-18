@@ -45,6 +45,8 @@ h1 { margin: 0; font-size: 1.25rem; font-weight: 600; }
 .entry { display: flex; gap: 8px; }
 input { width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface); color: var(--text); font: inherit; }
 input:focus { border-color: var(--accent); }
+.player .sponsorblock { margin-top: 8px; }
+.sponsorblock input { width: auto; margin-inline: 0 4px; }
 button, .save { padding: 7px 16px; border: 1px solid var(--border); border-radius: 3px; background: var(--window); color: var(--text); font: inherit; text-decoration: none; cursor: pointer; white-space: nowrap; }
 button:hover, .save:hover { border-color: var(--accent); }
 button:disabled { opacity: .6; cursor: progress; }

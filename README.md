@@ -83,6 +83,9 @@ that allows the page's origin. Enter your personal proxy URL and access key in
 Personal proxy settings. The settings stay in browser storage, and the proxy
 handles download requests. Some proxies may be blocked by YouTube.
 
+SponsorBlock removes community-marked segments from YouTube downloads by default.
+Clear **Remove sponsored segments with SponsorBlock** to keep the original audio.
+
 To run it locally, install Node.js 25 or newer and pnpm, then run:
 
 ```
