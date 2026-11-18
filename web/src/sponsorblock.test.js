@@ -8,8 +8,11 @@ const sponsor = (start_time, end_time) => ({ category: 'sponsor', type: 'skip', 
 
 test('leaves audio intact when there are no usable cuts', () => {
   assert.deepEqual(sponsorBlockAudioArgs(undefined, 10), []);
-  assert.deepEqual(sponsorBlockAudioArgs([sponsor(0, 5), sponsor(4, 10)], 10), []);
   assert.deepEqual(sponsorBlockAudioArgs([{ ...sponsor(1, 2), type: 'poi' }], 10), []);
+});
+
+test('stops the download when SponsorBlock removes the entire recording', () => {
+  assert.throws(() => sponsorBlockAudioArgs([sponsor(0, 5), sponsor(4, 10)], 10), /No audio remains/);
 });
 
 test('FFmpeg WebAssembly cuts the marked samples and joins the remaining audio', async () => {

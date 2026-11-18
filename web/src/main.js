@@ -72,6 +72,7 @@ $('#download-form').addEventListener('submit', async (event) => {
       noplaylist: true,
       postprocessors: removeSponsors ? [sponsorBlockLookup] : [],
     });
+    const cuts = removeSponsors ? sponsorBlockAudioArgs(info.sponsorblock_chapters, info.duration) : [];
     const name = info.title || 'Your song';
     screen('Downloading', name, null);
     const files = await ytdlp.download(info, { format: 'bestaudio/best', noplaylist: true }, {
@@ -91,7 +92,6 @@ $('#download-form').addEventListener('submit', async (event) => {
     for (const [field, value] of Object.entries({ title: info.title, artist: info.artist || info.uploader, album: info.album || info.artist || info.uploader })) {
       if (typeof value === 'string' && value.trim()) metadata.push('-metadata', `${field}=${Array.from(value).slice(0, 512).join('')}`);
     }
-    const cuts = removeSponsors ? sponsorBlockAudioArgs(info.sponsorblock_chapters, info.duration) : [];
     const result = await ffmpeg.exec(['-i', 'input', '-map', '0:a:0', '-vn', ...cuts, '-map_metadata', '-1', ...metadata, '-c:a', 'libmp3lame', '-q:a', '0', '-ar', '44100', '-ac', '2', '-id3v2_version', '3', '-write_id3v1', '0', 'output.mp3']);
     if (result !== 0) throw new Error('The audio could not be converted to MP3.');
     const bytes = await ffmpeg.readFile('output.mp3');

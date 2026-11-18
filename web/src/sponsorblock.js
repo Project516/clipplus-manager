@@ -19,7 +19,9 @@ export function sponsorBlockAudioArgs(chapters, duration) {
     start = Math.max(start, cut.end_time);
   }
   if (start < end) keep.push([start, Infinity]);
-  if (!keep.length) return [];
+  if (!keep.length) {
+    throw new Error('No audio remains after applying SponsorBlock. Clear the SponsorBlock checkbox to download the original audio.');
+  }
 
   // Trim decoded samples to avoid the extra packets from stream-copy seeks.
   const trims = keep.map(([from, to]) =>
