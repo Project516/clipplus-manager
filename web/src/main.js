@@ -4,6 +4,7 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import coreURL from '../node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js?url';
 import wasmURL from '../node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.wasm?url';
 import { explain, safeName, validateMp3 } from './output.js';
+import { sponsorBlockAudioArgs, sponsorBlockLookup } from './sponsorblock.js';
 
 // The wheel name changes with each yt-dlp release.
 const [wheelURL] = Object.values(import.meta.glob('../node_modules/@project516/yt-dlp-wasm/dist/*.whl', { query: '?url', import: 'default', eager: true }));
@@ -12,6 +13,7 @@ const proxy = $('#proxy');
 const key = $('#key');
 const save = $('#save');
 const meter = $('#meter');
+const sponsorBlock = $('#sponsorblock');
 
 $('#settings-link').addEventListener('click', () => {
   $('#settings').open = true;
@@ -59,13 +61,17 @@ $('#download-form').addEventListener('submit', async (event) => {
   $('#submit').disabled = true;
   save.hidden = true;
   if (downloadURL) URL.revokeObjectURL(downloadURL);
+  const removeSponsors = sponsorBlock.checked;
   let ytdlp;
   let ffmpeg;
   try {
     screen('Starting', 'Loading the downloader. The first time takes a moment.', null);
     ytdlp = await createYtDlp({ corsProxy: proxy.value.trim(), corsProxyKey: key.value || undefined, wheelURL });
-    screen('Finding', 'Reading the link', null);
-    const info = await ytdlp.extractInfo($('#url').value, { noplaylist: true });
+    screen('Finding', removeSponsors ? 'Reading the link and checking SponsorBlock' : 'Reading the link', null);
+    const info = await ytdlp.extractInfo($('#url').value, {
+      noplaylist: true,
+      postprocessors: removeSponsors ? [sponsorBlockLookup] : [],
+    });
     const name = info.title || 'Your song';
     screen('Downloading', name, null);
     const files = await ytdlp.download(info, { format: 'bestaudio/best', noplaylist: true }, {
@@ -85,7 +91,8 @@ $('#download-form').addEventListener('submit', async (event) => {
     for (const [field, value] of Object.entries({ title: info.title, artist: info.artist || info.uploader, album: info.album || info.artist || info.uploader })) {
       if (typeof value === 'string' && value.trim()) metadata.push('-metadata', `${field}=${Array.from(value).slice(0, 512).join('')}`);
     }
-    const result = await ffmpeg.exec(['-i', 'input', '-map', '0:a:0', '-vn', '-map_metadata', '-1', ...metadata, '-c:a', 'libmp3lame', '-q:a', '0', '-ar', '44100', '-ac', '2', '-id3v2_version', '3', '-write_id3v1', '0', 'output.mp3']);
+    const cuts = removeSponsors ? sponsorBlockAudioArgs(info.sponsorblock_chapters, info.duration) : [];
+    const result = await ffmpeg.exec(['-i', 'input', '-map', '0:a:0', '-vn', ...cuts, '-map_metadata', '-1', ...metadata, '-c:a', 'libmp3lame', '-q:a', '0', '-ar', '44100', '-ac', '2', '-id3v2_version', '3', '-write_id3v1', '0', 'output.mp3']);
     if (result !== 0) throw new Error('The audio could not be converted to MP3.');
     const bytes = await ffmpeg.readFile('output.mp3');
     validateMp3(bytes);

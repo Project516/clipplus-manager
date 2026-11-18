@@ -6,6 +6,9 @@ export function safeName(name) {
 
 export function explain(error) {
   const message = String(error?.message ?? error);
+  if (message.includes('Unable to communicate with SponsorBlock API')) {
+    return 'SponsorBlock is unavailable. Clear “Remove sponsored segments with SponsorBlock” to download the original audio.';
+  }
   if (message.includes('Failed to fetch')) {
     return 'Could not reach your proxy. Check the proxy URL in Proxy settings, and that the proxy allows this site.';
   }

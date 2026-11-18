@@ -12,6 +12,10 @@ test('explains an unreachable proxy', () => {
   assert.equal(explain('boom'), 'Could not make the MP3: boom');
 });
 
+test('explains how to retry when SponsorBlock is unavailable', () => {
+  assert.match(explain('Unable to communicate with SponsorBlock API: Failed to fetch'), /Clear.*SponsorBlock/);
+});
+
 test('checks the tag size and MP3 header', () => {
   assert.doesNotThrow(() => validateMp3(Uint8Array.from([0xff, 0xfb, 0x90, 0x00])));
   assert.throws(() => validateMp3(Uint8Array.from([0x49,0x44,0x33,3,0,0,1,0,0,0])));
