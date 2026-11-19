@@ -23,7 +23,7 @@ export function explain(error) {
     return 'SponsorBlock is unavailable. Clear “Remove sponsored segments with SponsorBlock” to download the original audio.';
   }
   if (message.includes('Failed to fetch')) {
-    return 'Could not reach your proxy. Check the proxy URL in Proxy settings, and that the proxy allows this site.';
+    return 'Could not reach your proxy. Check the proxy URL in Settings, and that the proxy allows this site.';
   }
   return `Could not make the MP3: ${message}`;
 }

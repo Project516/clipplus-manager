@@ -31,7 +31,7 @@ async function open(t) {
   });
 
   await page.goto(origin);
-  await page.getByRole('link', { name: 'Soulseek' }).click();
+  await page.getByRole('navigation').getByRole('link', { name: 'Soulseek' }).click();
   const signIn = async (password) => {
     await page.getByLabel('Relay token').fill('fixture-token');
     await page.getByLabel('Soulseek username').fill('fixture-user');
@@ -39,12 +39,19 @@ async function open(t) {
     await page.getByRole('button', { name: 'Sign in' }).click();
   };
   const mock = (read) => page.evaluate(read);
-  return { page, signIn, mock, musicbrainzRequests };
+  const saveRelay = async () => {
+    await page.getByRole('navigation').getByRole('link', { name: 'Settings' }).click();
+    await page.getByLabel('Relay URL').fill(relayURL);
+    await page.locator('#relay-form').getByRole('button', { name: 'Save settings' }).click();
+    await page.getByText('Settings saved.', { exact: true }).waitFor();
+    await page.getByRole('navigation').getByRole('link', { name: 'Soulseek' }).click();
+  };
+  return { page, signIn, mock, saveRelay, musicbrainzRequests };
 }
 
 async function signedIn(t) {
   const opened = await open(t);
-  await opened.page.getByLabel('Private relay URL').fill(relayURL);
+  await opened.saveRelay();
   await opened.signIn('fixture-password');
   await opened.page.getByText('Connected to Soulseek', { exact: true }).waitFor();
   return opened;
@@ -87,10 +94,12 @@ async function saveAs(page, linkName) {
 }
 
 test('signs in, finds a song, downloads, and saves it with a mock client', { timeout: 120_000 }, async (t) => {
-  const { page, signIn, mock, musicbrainzRequests } = await open(t);
+  const { page, signIn, mock, saveRelay, musicbrainzRequests } = await open(t);
 
-  const relayInput = page.getByLabel('Private relay URL');
-  await relayInput.fill(relayURL);
+  await page.getByLabel('Relay token').fill('fixture-token');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByText('Add your relay URL in Settings first.', { exact: true }).waitFor();
+  await saveRelay();
   const healthPagePromise = page.waitForEvent('popup');
   await page.getByRole('link', { name: 'sign in to the relay in a new tab' }).click();
   const healthPage = await healthPagePromise;
@@ -98,7 +107,8 @@ test('signs in, finds a song, downloads, and saves it with a mock client', { tim
   assert.equal(healthPage.url(), healthURL);
   await healthPage.close();
   await page.reload();
-  assert.equal(await relayInput.inputValue(), relayURL);
+  assert.equal(await page.getByRole('heading', { name: 'Soulseek', level: 1 }).isVisible(), true);
+  assert.equal(await page.getByLabel('Relay URL').inputValue(), relayURL);
 
   await signIn('wrong-password');
   await page.getByText('Soulseek rejected the sign-in: INVALIDPASS', { exact: true }).waitFor();
@@ -295,4 +305,30 @@ test('finds an album folder, saves its songs as a zip, and cancels the rest', { 
   );
   assert.equal(await page.getByRole('link', { name: /^Save/ }).count(), 0);
   assert.equal(await mock(() => globalThis.nicotineMock.downloads.some((entry) => entry.path.endsWith('Tide.flac'))), false);
+});
+
+test('makes a Soulseek account when the login is left empty, and reuses it', { timeout: 60_000 }, async (t) => {
+  const { page, mock, saveRelay } = await open(t);
+  const signInWithToken = async () => {
+    await page.getByLabel('Relay token').fill('fixture-token');
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await page.getByText('Connected to Soulseek', { exact: true }).waitFor();
+  };
+  await saveRelay();
+  await page.getByLabel('Relay token').fill('fixture-token');
+  await page.getByLabel('Soulseek username').fill('only-a-name');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByText(/^Enter both your Soulseek username and password/).waitFor();
+  await page.getByLabel('Soulseek username').fill('');
+
+  await signInWithToken();
+  const { username } = await mock(() => globalThis.nicotineMock.connections.at(-1));
+  assert.match(username, /^clipplus[0-9a-f]{10}$/);
+  await page.getByText(`Signed in to Soulseek as ${username}.`, { exact: true }).waitFor();
+  assert.equal(await page.getByLabel('Soulseek password').inputValue(), '');
+
+  await page.getByRole('button', { name: 'Disconnect' }).click();
+  await page.reload();
+  await signInWithToken();
+  assert.equal((await mock(() => globalThis.nicotineMock.connections.at(-1))).username, username);
 });

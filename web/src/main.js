@@ -13,13 +13,21 @@ const save = $('#save');
 const meter = $('#meter');
 const sponsorBlock = $('#sponsorblock');
 
-function openPanel(id) {
-  const panel = document.getElementById(id);
-  if (panel instanceof HTMLDetailsElement) panel.open = true;
+// Each sidebar link shows one page, like the desktop app.
+const pages = [...document.querySelectorAll('.page')];
+function showPage() {
+  const current = pages.find((page) => `#${page.id}` === location.hash) ?? pages[0];
+  for (const page of pages) page.hidden = page !== current;
+  for (const link of document.querySelectorAll('nav a')) {
+    const active = link.hash === `#${current.id}`;
+    link.classList.toggle('nav-current', active);
+    if (active) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  }
+  scrollTo(0, 0);
 }
-for (const link of document.querySelectorAll('nav a')) link.addEventListener('click', () => openPanel(link.hash.slice(1)));
-openPanel(location.hash.slice(1));
-addEventListener('hashchange', () => openPanel(location.hash.slice(1)));
+addEventListener('hashchange', showPage);
+showPage();
 
 // fraction: undefined hides the bar, null shows it busy, 0 to 1 fills it.
 // Messages the user must act on show in full; song titles are clamped.
@@ -54,8 +62,8 @@ $('#proxy-form').addEventListener('submit', (event) => {
 $('#download-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!proxy.value.trim()) {
-    document.querySelector('details').open = true;
-    screen('Set up a proxy', 'Add your proxy URL in Proxy settings below.', undefined, true);
+    screen('Set up a proxy', 'Add your proxy URL in Settings.', undefined, true);
+    location.hash = '#settings';
     proxy.focus();
     return;
   }

@@ -39,7 +39,8 @@ function aborted(signal) {
 export async function connectClient({ relayURL, relayToken, username, password }) {
   fixture.connections.push({ relayURL, relayToken, username });
   await tick();
-  if (password !== 'fixture-password') {
+  // The browser account has a 48-character hex password.
+  if (password !== 'fixture-password' && !/^[0-9a-f]{48}$/.test(password)) {
     throw Object.assign(new Error('Login failed'), { name: 'LoginError', reason: 'INVALIDPASS' });
   }
   const closed = Promise.withResolvers();

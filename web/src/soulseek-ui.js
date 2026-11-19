@@ -5,7 +5,7 @@ import { recordingDetails, searchRecordings } from './musicbrainz.js';
 import { safeName } from './output.js';
 import {
   PLAYABLE, RESULT_LIMIT, addResult, albumDetails, albumKey, baseName, describeProgress, fileDetails, fileKey,
-  formatSize, groupAlbumFiles, parentFolder, plural, secureRelayURL,
+  formatSize, groupAlbumFiles, newAccount, parentFolder, plural, secureRelayURL,
 } from './soulseek.js';
 import { uniqueName, zipStored } from './zip.js';
 
@@ -20,6 +20,7 @@ const relayURL = $('#relay-url');
 const relayAccess = $('#relay-access');
 const relayAccessLink = $('#relay-access-link');
 const relayURLKey = 'soulseekRelayURL';
+const accountKey = 'soulseekAccount';
 const status = $('#soulseek-status');
 const session = $('#soulseek-session');
 const lookupMeter = $('#soulseek-searching');
@@ -44,6 +45,7 @@ const hints = {
 };
 
 let client;
+let savedRelay = '';
 let search;
 let step = 'search';
 let songs = [];
@@ -62,7 +64,7 @@ const rowDetails = (row) => (isFolder(row) ? albumDetails(row) : fileDetails(row
 
 function updateRelayAccess() {
   try {
-    const healthURL = new URL('/healthz', secureRelayURL(relayURL.value));
+    const healthURL = new URL('/healthz', secureRelayURL(savedRelay));
     healthURL.protocol = 'https:';
     relayAccessLink.href = healthURL.href;
     relayAccess.hidden = false;
@@ -73,18 +75,28 @@ function updateRelayAccess() {
 }
 
 try {
-  relayURL.value = localStorage.getItem(relayURLKey) || '';
+  savedRelay = localStorage.getItem(relayURLKey) || '';
 } catch { /* Storage can be disabled. */ }
+relayURL.value = savedRelay;
 updateRelayAccess();
-relayURL.addEventListener('input', updateRelayAccess);
-relayURL.addEventListener('change', () => {
+
+$('#relay-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const relayStatus = $('#relay-status');
   try {
-    if (relayURL.value) {
-      localStorage.setItem(relayURLKey, secureRelayURL(relayURL.value).href);
-    } else {
-      localStorage.removeItem(relayURLKey);
-    }
-  } catch { /* Invalid URLs and disabled storage cannot be saved. */ }
+    savedRelay = secureRelayURL(relayURL.value.trim()).href;
+  } catch {
+    relayStatus.textContent = 'Enter a wss:// relay URL. You enter the relay token when you sign in.';
+    return;
+  }
+  relayURL.value = savedRelay;
+  updateRelayAccess();
+  try {
+    localStorage.setItem(relayURLKey, savedRelay);
+    relayStatus.textContent = 'Settings saved.';
+  } catch {
+    relayStatus.textContent = 'Settings could not be saved. They will work until this page closes.';
+  }
 });
 
 function showView() {
@@ -510,19 +522,37 @@ fullAlbumButton.addEventListener('click', () => {
   query.focus();
 });
 
+// Saved like the desktop account file. Accounts the user types in are never saved.
+function browserAccount() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(accountKey));
+    if (saved?.username && saved?.password) return saved;
+  } catch { /* Storage can be disabled or hold bad data. */ }
+  const account = newAccount();
+  try {
+    localStorage.setItem(accountKey, JSON.stringify(account));
+  } catch { /* Without storage, the account lasts until this page closes. */ }
+  return account;
+}
+
 loginForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (client) return;
   let url;
   try {
-    url = secureRelayURL(relayURL.value);
+    url = secureRelayURL(savedRelay);
   } catch {
-    status.textContent = 'Enter a wss:// relay URL. Put the relay token in its own field.';
+    status.textContent = 'Add your relay URL in Settings first.';
     return;
   }
+  let username = $('#soulseek-user').value.trim();
+  let password = $('#soulseek-password').value;
+  if (!username !== !password) {
+    status.textContent = 'Enter both your Soulseek username and password, or leave both empty to use this browser\'s account.';
+    return;
+  }
+  if (!username) ({ username, password } = browserAccount());
   const relayToken = $('#relay-token').value;
-  const username = $('#soulseek-user').value;
-  const password = $('#soulseek-password').value;
   $('#relay-token').value = '';
   $('#soulseek-password').value = '';
   const button = loginForm.querySelector('button');
@@ -537,7 +567,7 @@ loginForm.addEventListener('submit', async (event) => {
     };
     connected.closed.then(dropped, dropped);
     showView();
-    status.textContent = 'Signed in to Soulseek.';
+    status.textContent = `Signed in to Soulseek as ${username}.`;
     query.focus();
   } catch (error) {
     status.textContent = error?.reason

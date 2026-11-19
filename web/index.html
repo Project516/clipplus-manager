@@ -19,8 +19,8 @@
 
     <nav aria-label="Pages"><a class="nav-current" href="#downloads">Downloads</a><a href="#soulseek">Soulseek</a><a href="#settings">Settings</a></nav>
     </aside>
-    <section class="content" id="downloads">
-    <header class="page-header"><h1>Downloads</h1></header>
+    <section class="content page" id="downloads" aria-labelledby="downloads-title">
+    <header class="page-header"><h1 id="downloads-title">Downloads</h1></header>
 
     <form id="download-form" class="player">
       <p class="description">Turn a YouTube link into an MP3 for your Sansa in your browser.</p>
@@ -40,32 +40,23 @@
       <a id="save" class="save" hidden>Save MP3</a>
     </form>
 
-    <details class="settings" id="settings">
-      <summary>Proxy settings</summary>
-      <p>Browsers block the requests a YouTube download needs, so this page sends them through your own <a href="https://github.com/Project516/yt-dlp-wasm/tree/master/packages/cors-proxy" target="_blank" rel="noopener noreferrer">yt-dlp-wasm proxy</a>. The proxy must allow this site's address.</p>
-      <form id="proxy-form">
-        <label for="proxy">Proxy URL</label>
-        <input id="proxy" type="url" placeholder="https://proxy.example.com" required>
-        <label for="key">Access key <span>(if your proxy needs one)</span></label>
-        <input id="key" type="password" autocomplete="off">
-        <div class="settings-actions"><button type="submit" class="secondary">Save settings</button><span id="settings-status" role="status"></span></div>
-      </form>
-      <p class="note">Your proxy URL and key stay in this browser.</p>
-    </details>
+    <footer>Copy the saved MP3 into the <strong>Tracks</strong> folder on your Clip+'s SD card.</footer>
+    </section>
 
-    <details class="settings" id="soulseek">
-      <summary>Soulseek</summary>
-      <p>Find a song or an album and save it for your Clip+. Files come from Soulseek, so sign in through your own secure WebSocket relay. The relay must allow this site's origin.</p>
+    <section class="content page" id="soulseek" aria-labelledby="soulseek-title" hidden>
+    <header class="page-header"><h1 id="soulseek-title">Soulseek</h1></header>
+
+    <div class="settings">
+      <p>Find a song or an album and save it for your Clip+. Files come from Soulseek through your own secure WebSocket relay, which you set up in <a href="#settings">Settings</a>.</p>
       <form id="soulseek-login" autocomplete="off">
-        <label for="relay-url">Private relay URL (wss://)</label>
-        <input id="relay-url" type="url" required>
         <p id="relay-access" hidden>If your relay uses Cloudflare Access, <a id="relay-access-link" target="_blank" rel="noopener noreferrer">sign in to the relay in a new tab</a>. When the page shows <code>ok</code>, return here and enter your relay token.</p>
         <label for="relay-token">Relay token</label>
         <input id="relay-token" type="password" required>
-        <label for="soulseek-user">Soulseek username</label>
-        <input id="soulseek-user" required>
-        <label for="soulseek-password">Soulseek password</label>
-        <input id="soulseek-password" type="password" required>
+        <label for="soulseek-user">Soulseek username <span>(optional)</span></label>
+        <input id="soulseek-user" autocomplete="off">
+        <label for="soulseek-password">Soulseek password <span>(optional)</span></label>
+        <input id="soulseek-password" type="password" autocomplete="off">
+        <p class="note">Leave both empty and this browser makes a Soulseek account for you and keeps it, like the desktop app.</p>
         <div class="settings-actions"><button type="submit">Sign in</button></div>
       </form>
       <div id="soulseek-session" hidden>
@@ -106,9 +97,37 @@
         <div class="section-header"><h2 id="soulseek-downloads-heading">Downloads</h2><button id="soulseek-clear" type="button" disabled>Clear finished</button></div>
         <ul class="files jobs"></ul>
       </section>
-    </details>
+    </div>
 
     <footer>Copy saved songs into the <strong>Tracks</strong> folder on your Clip+'s SD card.</footer>
+    </section>
+
+    <section class="content page" id="settings" aria-labelledby="settings-title" hidden>
+    <header class="page-header"><h1 id="settings-title">Settings</h1></header>
+
+    <section class="settings" aria-labelledby="proxy-heading">
+      <h2 id="proxy-heading">YouTube proxy</h2>
+      <p>Browsers block the requests a YouTube download needs, so this page sends them through your own <a href="https://github.com/Project516/yt-dlp-wasm/tree/master/packages/cors-proxy" target="_blank" rel="noopener noreferrer">yt-dlp-wasm proxy</a>. The proxy must allow this site's address.</p>
+      <form id="proxy-form">
+        <label for="proxy">Proxy URL</label>
+        <input id="proxy" type="url" placeholder="https://proxy.example.com" required>
+        <label for="key">Access key <span>(if your proxy needs one)</span></label>
+        <input id="key" type="password" autocomplete="off">
+        <div class="settings-actions"><button type="submit" class="secondary">Save settings</button><span id="settings-status" role="status"></span></div>
+      </form>
+      <p class="note">Your proxy URL and key stay in this browser.</p>
+    </section>
+
+    <section class="settings" aria-labelledby="relay-heading">
+      <h2 id="relay-heading">Soulseek relay</h2>
+      <p>Soulseek search and downloads go through your own secure WebSocket relay. The relay must allow this site's address.</p>
+      <form id="relay-form">
+        <label for="relay-url">Relay URL <span>(wss://)</span></label>
+        <input id="relay-url" type="url" placeholder="wss://relay.example.com/relay" required>
+        <div class="settings-actions"><button type="submit">Save settings</button><span id="relay-status" role="status"></span></div>
+      </form>
+      <p class="note">Your relay URL stays in this browser. You enter the relay token each time you sign in.</p>
+    </section>
     </section>
   </main>
   <script type="module" src="/src/main.js"></script>

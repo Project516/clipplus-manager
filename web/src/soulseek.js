@@ -69,6 +69,13 @@ export function groupAlbumFiles(groups, { username, files }, limit = RESULT_LIMI
 
 export const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
 
+const hex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+
+// Same shape as the desktop account in core/src/slskd.rs. The server registers an unused name on first login.
+export function newAccount(random = (length) => crypto.getRandomValues(new Uint8Array(length))) {
+  return { username: `clipplus${hex(random(5))}`, password: hex(random(24)) };
+}
+
 export const albumDetails = ({ username, songs, format }) => [username, plural(songs, 'song'), format].join(' · ');
 
 export function formatSize(bytes) {

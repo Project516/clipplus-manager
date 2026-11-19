@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { addResult, albumDetails, baseName, describeProgress, fileDetails, formatDuration, formatSize, groupAlbumFiles, parentFolder, plural, secureRelayURL } from './soulseek.js';
+import { addResult, albumDetails, baseName, describeProgress, fileDetails, formatDuration, formatSize, groupAlbumFiles, newAccount, parentFolder, plural, secureRelayURL } from './soulseek.js';
+
+test('makes an account shaped like the desktop one', () => {
+  const account = newAccount();
+  assert.match(account.username, /^clipplus[0-9a-f]{10}$/);
+  assert.match(account.password, /^[0-9a-f]{48}$/);
+  assert.notEqual(newAccount().username, account.username);
+  assert.deepEqual(newAccount((length) => new Uint8Array(length).fill(171)), { username: 'clipplusababababab', password: 'ab'.repeat(24) });
+});
 
 test('accepts only secure relay URLs without embedded credentials', () => {
   assert.equal(secureRelayURL('wss://relay.invalid/socket').pathname, '/socket');

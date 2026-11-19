@@ -53,8 +53,10 @@ test('the production build signs in and sends a search through a relay fixture',
     });
   });
 
-  await page.goto(`${origin}/#soulseek`);
-  await page.getByLabel('Private relay URL').fill(relayURL);
+  await page.goto(`${origin}/#settings`);
+  await page.getByLabel('Relay URL').fill(relayURL);
+  await page.locator('#relay-form').getByRole('button', { name: 'Save settings' }).click();
+  await page.getByRole('navigation').getByRole('link', { name: 'Soulseek' }).click();
   await page.getByLabel('Relay token').fill('fixture-token');
   await page.getByLabel('Soulseek username').fill('fixture-user');
   await page.getByLabel('Soulseek password').fill('fixture-password');
