@@ -242,8 +242,13 @@ function renderResults() {
 
 // One at a time, so several finished downloads do not each start an FFmpeg worker.
 function fixQueued(blob, extension, signal, onProgress, metadata) {
+  let source = blob;
+  // A canceled job must not keep its audio while it waits behind another fix.
+  signal.addEventListener('abort', () => { source = undefined; }, { once: true });
   const run = async () => {
     signal.throwIfAborted();
+    const bytes = new Uint8Array(await source.arrayBuffer());
+    source = undefined;
     onProgress(null);
     const ffmpeg = new FFmpeg();
     const stop = () => ffmpeg.terminate();
@@ -253,7 +258,7 @@ function fixQueued(blob, extension, signal, onProgress, metadata) {
         if (progress >= 0 && progress <= 1) onProgress(progress);
       });
       await ffmpeg.load(ffmpegCore);
-      return await fixForSansa(ffmpeg, new Uint8Array(await blob.arrayBuffer()), extension, metadata);
+      return await fixForSansa(ffmpeg, bytes, extension, metadata);
     } finally {
       signal.removeEventListener('abort', stop);
       ffmpeg.terminate();
