@@ -7,6 +7,11 @@ test('names fit on the card and reject invalid characters', () => {
   assert.ok(new TextEncoder().encode(safeName('é'.repeat(200) + '.webm')).length <= 247);
 });
 
+test('keeps the extension of a downloaded song', () => {
+  assert.equal(safeName('01 Song: Live.flac', 'flac'), '01 Song_ Live.flac');
+  assert.ok(new TextEncoder().encode(safeName('é'.repeat(200) + '.opus', 'opus')).length <= 247);
+});
+
 test('explains an unreachable proxy', () => {
   assert.match(explain(new Error("TransportError('TypeError: Failed to fetch')")), /reach your proxy/);
   assert.equal(explain('boom'), 'Could not make the MP3: boom');

@@ -1,24 +1,11 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { test } from 'node:test';
 import { chromium } from 'playwright-core';
 import { preview } from 'vite';
 
-const require = createRequire(import.meta.url);
-const pyodidePath = dirname(createRequire(require.resolve('@project516/nicotine-plus-wasm')).resolve('pyodide'));
-const pyodideRoot = 'https://cdn.jsdelivr.net/pyodide/v314.0.7/full/';
-const runtimeFiles = new Map([
-  ['pyodide.mjs', 'text/javascript'],
-  ['pyodide.asm.mjs', 'text/javascript'],
-  ['pyodide.asm.wasm', 'application/wasm'],
-  ['pyodide-lock.json', 'application/json'],
-  ['python_stdlib.zip', 'application/zip'],
-]);
-
-test('signs in, sends a search, and shows a peer address through a relay fixture', { timeout: 60_000 }, async (t) => {
-  const server = await preview({ preview: { host: '127.0.0.1', port: 0 } });
+test('signs in, searches, downloads, and saves a song with a mock client', { timeout: 60_000 }, async (t) => {
+  const server = await preview({ mode: 'fixture', preview: { host: '127.0.0.1', port: 0 } });
   t.after(() => server.close());
   const browser = await chromium.launch({ channel: 'chrome' });
   t.after(() => browser.close());
@@ -27,47 +14,12 @@ test('signs in, sends a search, and shows a peer address through a relay fixture
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   const relayURL = 'wss://relay.invalid/socket';
   const healthURL = 'https://relay.invalid/healthz';
-  const sent = [];
-  const missingPeerRequest = Promise.withResolvers();
 
-  await context.route('**/*', async (route) => {
+  await context.route('**/*', (route) => {
     const url = new URL(route.request().url());
     if (url.origin === origin) return route.continue();
     if (url.href === healthURL) return route.fulfill({ contentType: 'text/plain', body: 'ok' });
-    if (url.href.startsWith(pyodideRoot)) {
-      const file = url.href.slice(pyodideRoot.length);
-      const contentType = runtimeFiles.get(file);
-      if (contentType) {
-        return route.fulfill({
-          body: await readFile(join(pyodidePath, file)),
-          contentType,
-          headers: { 'Access-Control-Allow-Origin': '*' },
-        });
-      }
-    }
     return route.abort();
-  });
-
-  await page.routeWebSocket(relayURL, (socket) => {
-    socket.onMessage((message) => {
-      sent.push(message);
-      if (typeof message === 'string') {
-        socket.send('ready');
-        return;
-      }
-      switch (message.readUInt32LE(4)) {
-        case 1:
-          socket.send(Buffer.from('12000000010000000100000000010000c00000000000', 'hex'));
-          break;
-        case 3:
-          if (message.toString('utf8', 12) === 'missing') {
-            missingPeerRequest.resolve();
-            break;
-          }
-          socket.send(Buffer.from('1a000000030000000400000070656572010200c0f9160000000000000000', 'hex'));
-          break;
-      }
-    });
   });
 
   await page.goto(origin);
@@ -82,42 +34,62 @@ test('signs in, sends a search, and shows a peer address through a relay fixture
   await healthPage.close();
   await page.reload();
   assert.equal(await relayInput.inputValue(), relayURL);
-  await page.getByLabel('Relay token').fill('fixture-token');
-  await page.getByLabel('Soulseek username').fill('fixture-user');
-  await page.getByLabel('Soulseek password').fill('fixture-password');
-  await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.getByText('Signed in to Soulseek.', { exact: true }).waitFor();
-  assert.equal(sent[0], 'fixture-token');
-  assert.equal(sent[1].readUInt32LE(4), 1);
-  assert.equal(sent[1].toString('utf8', 12, 24), 'fixture-user');
-  assert.equal(await page.getByLabel('Soulseek password').inputValue(), '');
+
+  const signIn = async (password) => {
+    await page.getByLabel('Relay token').fill('fixture-token');
+    await page.getByLabel('Soulseek username').fill('fixture-user');
+    await page.getByLabel('Soulseek password').fill(password);
+    await page.getByRole('button', { name: 'Sign in' }).click();
+  };
+  await signIn('wrong-password');
+  await page.getByText('Soulseek rejected the sign-in: INVALIDPASS', { exact: true }).waitFor();
   assert.equal(await page.getByLabel('Relay token').inputValue(), '');
+  assert.equal(await page.getByLabel('Soulseek password').inputValue(), '');
 
-  await page.getByLabel('Search query').fill('test');
-  await page.getByRole('button', { name: 'Send search request' }).click();
-  await page.getByText('Search request sent. Search results are unavailable.', { exact: true }).waitFor();
-  await page.getByLabel('Peer username').fill('peer');
-  await page.getByRole('button', { name: 'Look up peer address' }).click();
-  await page.getByText(`peer · ${[192, 0, 2, 1].join('.')}:5881`, { exact: true }).waitFor();
-  assert.equal(sent[2].readUInt32LE(4), 26);
-  assert.equal(sent[2].toString('utf8', 16), 'test');
-  assert.equal(sent[3].toString('hex'), '0c000000030000000400000070656572');
+  await signIn('fixture-password');
+  await page.getByText('Connected to Soulseek', { exact: true }).waitFor();
+  assert.deepEqual(await page.evaluate(() => globalThis.nicotineMock.connections.at(-1)), {
+    relayURL,
+    relayToken: 'fixture-token',
+    username: 'fixture-user',
+  });
 
-  await page.clock.install();
-  await page.getByLabel('Peer username').fill('missing');
-  await page.getByRole('button', { name: 'Look up peer address' }).click();
-  await missingPeerRequest.promise;
-  await page.clock.fastForward(15_001);
-  await page.getByText('The peer address lookup timed out.', { exact: true }).waitFor();
+  await page.getByLabel('Search Soulseek').fill('song');
+  await page.getByRole('button', { name: 'Search' }).click();
+  await page.getByText('Found 4 files.', { exact: true }).waitFor();
+  const rows = page.locator('#soulseek-results label');
+  assert.deepEqual(await rows.locator('.file-name').allTextContents(), ['02 Free.mp3', '04 Missing.mp3', '01 Song.mp3', '03 Slow.flac']);
+  const row = (name) => rows.filter({ hasText: name });
+  assert.equal(await row('01 Song.mp3').locator('.file-details').textContent(), 'queue-user · 5.0 MB · 320 kbps · 3:45');
+  const downloadButton = page.getByRole('button', { name: 'Download', exact: true });
+  assert.equal(await downloadButton.isDisabled(), true);
 
-  await page.getByLabel('Peer username').fill('peer');
-  await page.getByRole('button', { name: 'Look up peer address' }).click();
-  await page.getByText(`peer · ${[192, 0, 2, 1].join('.')}:5881`, { exact: true }).waitFor();
+  await row('01 Song.mp3').click();
+  await downloadButton.click();
+  const save = page.getByRole('link', { name: 'Save 01 Song.mp3' });
+  await save.waitFor();
+  const [saved] = await Promise.all([page.waitForEvent('download'), save.click()]);
+  assert.equal(saved.suggestedFilename(), '01 Song.mp3');
+  assert.equal(await readFile(await saved.path(), 'utf8'), 'fixture:Music\\Album\\01 Song.mp3');
 
-  await page.getByLabel('Peer username').fill('missing');
-  await page.getByRole('button', { name: 'Look up peer address' }).click();
-  await page.getByText('Looking up peer address…', { exact: true }).waitFor();
+  await row('04 Missing.mp3').click();
+  await downloadButton.click();
+  await page.getByText('Download failed: File not shared.', { exact: true }).waitFor();
+
+  await row('03 Slow.flac').click();
+  await downloadButton.click();
+  await page.getByText('Queued, position 2', { exact: true }).waitFor();
+  assert.equal(await downloadButton.isDisabled(), true);
+  await page.getByRole('button', { name: 'Cancel 03 Slow.flac' }).click();
+  await page.getByText('Canceled', { exact: true }).waitFor();
+  assert.equal(await downloadButton.isDisabled(), false);
+
+  await page.evaluate(() => globalThis.nicotineMock.drop());
+  await page.getByText('Relay disconnected. Sign in to reconnect.', { exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Sign in' }).waitFor();
+
+  await signIn('fixture-password');
   await page.getByRole('button', { name: 'Disconnect' }).click();
   await page.getByText('Disconnected.', { exact: true }).waitFor();
-  await page.getByRole('button', { name: 'Sign in' }).waitFor();
+  assert.ok(await page.evaluate(() => globalThis.nicotineMock.closedByApp) >= 2);
 });

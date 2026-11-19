@@ -7,6 +7,8 @@
   --border: #bdc3c7;
   --accent: #3daee9;
   --selection: #d6edfa;
+  --negative: #b8323e;
+  --positive: #1d7a43;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -18,6 +20,8 @@
     --border: #555e63;
     --accent: #3daee9;
     --selection: #294a5b;
+    --negative: #ed6b76;
+    --positive: #4fcf85;
   }
 }
 
@@ -68,6 +72,29 @@ button:disabled { opacity: .6; cursor: progress; }
 .settings label span { color: var(--muted); }
 .settings-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
 .note { font-size: .9rem; }
+#soulseek-session { margin-top: 16px; }
+.connection { max-width: 480px; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; }
+.badge { padding: 1px 8px; border-radius: 3px; background: color-mix(in srgb, var(--positive) 16%, transparent); color: var(--positive); font-size: .9rem; }
+#soulseek-searching { max-width: 480px; }
+#soulseek-files h2 { margin: 20px 0 6px; font-size: 1rem; font-weight: 600; }
+.files { margin: 0; padding: 0; list-style: none; border: 1px solid var(--border); border-radius: 3px; }
+.choices { max-height: 26rem; overflow-y: auto; overscroll-behavior: contain; }
+.files > * { display: flex; align-items: center; gap: 12px; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.files > :last-child { border-bottom: 0; }
+.choices label { position: relative; display: flex; margin: 0; cursor: pointer; }
+.choices label:hover { background: var(--window); }
+.choices label:has(:checked) { background: var(--selection); }
+.choices label:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.choices input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.file { flex: 1; min-width: 0; }
+.settings .file-name, .settings .file-details { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings .file-name { color: var(--text); }
+.settings .file-details { color: var(--muted); font-size: .9rem; font-variant-numeric: tabular-nums; }
+.settings .file-details.failed { color: var(--negative); }
+.settings .file-details.done { color: var(--positive); }
+.files .meter { margin-top: 6px; }
+.files .save { margin-top: 0; }
+.settings-actions.end { justify-content: flex-end; }
 footer { padding: 0 24px 24px; color: var(--muted); }
 @keyframes scan { to { transform: translateX(300%); } }
 @media (max-width: 600px) {
