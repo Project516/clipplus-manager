@@ -76,15 +76,28 @@ The tests that make audio fixtures need an `ffmpeg` with the LAME encoder on `PA
 The browser version is at https://project516.dev/clipplus-manager/. GitHub Pages deploys
 it from `web/` on every push to `master` that changes it.
 
-It downloads one song as an MP3 for manual transfer to the
-Sansa's `Tracks/` folder. It needs a browser with JavaScript Promise Integration
-(JSPI) and a compatible [yt-dlp-wasm proxy](https://github.com/Project516/yt-dlp-wasm/tree/master/packages/cors-proxy)
-that allows the page's origin. Enter your personal proxy URL and access key in
-Personal proxy settings. The settings stay in browser storage, and the proxy
-handles download requests. Some proxies may be blocked by YouTube.
+The sidebar has three pages:
 
-SponsorBlock removes community-marked segments from YouTube downloads by default.
-Clear **Remove sponsored segments with SponsorBlock** to keep the original audio.
+- **Downloads** turns one YouTube link into an MP3. It needs a browser with
+  JavaScript Promise Integration (JSPI) and your own
+  [yt-dlp-wasm proxy](https://github.com/Project516/yt-dlp-wasm/tree/master/packages/cors-proxy)
+  that allows the page's origin. Some proxies may be blocked by YouTube.
+  SponsorBlock removes community-marked segments by default. Clear
+  **Remove sponsored segments with SponsorBlock** to keep the original audio.
+- **Soulseek** finds music like the desktop **Find music** page. **Song**
+  searches MusicBrainz, then Soulseek for a file. **Album** searches Soulseek
+  for album folders and saves the whole folder as one `.zip`. Each song is
+  fixed for the Sansa with the same rules as the desktop app before you save
+  it. Soulseek needs your own secure WebSocket relay for
+  [nicotine-plus-wasm](https://github.com/Project516/nicotine-plus-wasm). If
+  the relay uses Cloudflare Access, use the sign-in link on the page first.
+  Leave the Soulseek username and password empty to use an account that the
+  page makes and keeps in this browser, as the desktop app does.
+- **Settings** holds the proxy URL and key and the relay URL. They stay in
+  browser storage. The relay token is entered at each sign-in and never saved.
+
+Copy saved songs, or the songs from an album `.zip`, into the Sansa's
+`Tracks/` folder.
 
 To run it locally, install Node.js 25 or newer and pnpm, then run:
 

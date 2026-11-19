@@ -2,6 +2,8 @@
 
 A small, fast, native KDE desktop app. The user pastes links, the app downloads audio as mp3, fixes each file so a SanDisk Sansa Clip+ plays it, and copies the songs to the player's SD card when it is plugged in.
 
+A browser version in `web/` covers the download, find and fix steps. The user saves each file and copies it to the card.
+
 ## Direction
 
 Tradeoffs, in order:
@@ -21,6 +23,7 @@ The CI container is `registry.fedoraproject.org/fedora:45`, pinned by digest. Th
 - `src/`: the Qt app. `bridge.rs` is the cxx-qt QObject (list model and app state), `main.rs` starts Qt.
 - `qml/`: the Kirigami UI, compiled into the binary.
 - `packaging/appimage/`: AppImage build and tool fetch scripts.
+- `web/`: the browser version, plain JavaScript built with Vite and deployed to GitHub Pages. It runs yt-dlp, ffmpeg and Soulseek in WebAssembly. `web/src/fixer.js` and `web/src/musicbrainz.js` port `core/src/rules.rs` and `core/src/musicbrainz.rs`: change both sides together.
 
 The Qt build script links Qt into every target of its package, which is why the Qt-free code is a separate crate: its tests link without Qt.
 
@@ -33,12 +36,23 @@ cargo test --workspace
 packaging/appimage/build.sh
 ```
 
+Browser version, from `web/`:
+
+```
+pnpm install
+pnpm test
+pnpm run test:browser
+```
+
+`test:browser` needs Google Chrome. It builds the site twice: once as shipped, and once in fixture mode, where a mock replaces the Soulseek client.
+
 ## Rules
 
 - Never touch a real SANSA card in tests. Use a vfat image labeled `SANSA` attached as a loop device.
 - Public text (code, docs, commits, PRs) never names machines, IPs, home paths, real song names or accounts.
 - Feature work goes through a PR with squash merge. Commits follow Conventional Commits, one sentence.
 - Code comments say why, in a few words.
+- Browser tests make no network requests. Mock the relay WebSocket, MusicBrainz and the Pyodide files. Never put a relay URL, relay token or Soulseek login in source or tests.
 
 ## Glossary
 
@@ -52,3 +66,5 @@ packaging/appimage/build.sh
 - **Self update**: the AppImage replaces itself from this repo's latest release, then asks for a restart.
 - **OF**: the stock SanDisk firmware file, `clppa.bin`.
 - **Bootloader**: the Rockbox bootloader patched into the OF. The player flashes it after unplug.
+- **Relay**: the user's own WebSocket server that carries the browser's Soulseek connections. Its URL is saved in the browser; the token is entered at each sign-in.
+- **Fixture build**: `vite build --mode fixture`, the site with `test-browser/nicotine-mock.js` in place of the Soulseek package.
