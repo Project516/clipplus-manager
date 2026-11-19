@@ -408,8 +408,7 @@ mod tests {
                 username: "peer".into(),
                 filename: "track.mp3".into(),
                 size: 5,
-                length: None,
-                bitrate: None,
+                ..Default::default()
             },
             transfer: Some(crate::slskd::Transfer {
                 id: "a".into(),

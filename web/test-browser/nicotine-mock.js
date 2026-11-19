@@ -15,14 +15,14 @@ const results = [
   { username: 'gone-user', freeSlot: true, queueLength: 0, uploadSpeed: 100, files: [song('04 Missing.mp3', 3_000_000)] },
 ];
 
-const peer = (username, files) => ({ username, freeSlot: true, queueLength: 0, uploadSpeed: 1_000_000, files });
+const peer = (username, files, extra = {}) => ({ username, freeSlot: true, queueLength: 0, uploadSpeed: 1_000_000, files, ...extra });
 const tidewater = 'Music\\The Glass Harbor\\Tidewater (2019)';
 const folderSongs = ['Lantern.mp3', 'Missing.mp3', 'Reprise.mp3', 'cover.jpg', 'notes.txt', 'reprise.mp3'];
 const albumResults = [
   peer('quiet-keeper', [song(`${tidewater}\\Lantern.mp3`, 5_000_000), song(`${tidewater}\\Missing.mp3`, 5_000_000), song(`${tidewater}\\cover.jpg`, 90_000)]),
-  peer('salt-marsh', [song('Albums\\Glass Harbor - Tidewater\\01 Slow.flac', 30_000_000), song('Albums\\Glass Harbor - Tidewater\\02 Tide.flac', 30_000_000)]),
+  peer('salt-marsh', [song('Albums\\Glass Harbor - Tidewater\\01 Slow.flac', 30_000_000), song('Albums\\Glass Harbor - Tidewater\\02 Tide.flac', 30_000_000)], { freeSlot: false, queueLength: 518 }),
   peer('quiet-keeper', [song(`${tidewater}\\Reprise.mp3`, 5_000_000), song(`${tidewater}\\reprise.mp3`, 5_000_000)]),
-  peer('harbor-light', [song('Vinyl\\Locked\\Side A.mp3', 5_000_000), song('loose.mp3', 5_000_000)]),
+  peer('harbor-light', [song('Vinyl\\Locked\\Side A.mp3', 5_000_000), song('loose.mp3', 5_000_000)], { uploadSpeed: 3_000_000 }),
 ];
 const folders = new Map([
   ['queue-user\nMusic\\Album', ['01 Song.mp3']],

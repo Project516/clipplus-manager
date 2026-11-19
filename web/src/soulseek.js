@@ -10,11 +10,18 @@ export function secureRelayURL(value) {
   return url;
 }
 
+// A peer with no free slot or a long queue often never starts the download.
+const peerRank = (a, b) => b.freeSlot - a.freeSlot || a.queueLength - b.queueLength;
+
 function rank(a, b) {
-  return (b.extension === 'mp3') - (a.extension === 'mp3')
-    || b.freeSlot - a.freeSlot
+  return peerRank(a, b)
+    || (b.extension === 'mp3') - (a.extension === 'mp3')
     || b.uploadSpeed - a.uploadSpeed;
 }
+
+export const albumRank = (a, b) => peerRank(a, b) || b.uploadSpeed - a.uploadSpeed;
+
+const queueText = ({ freeSlot, queueLength }) => (freeSlot ? 'free slot' : `queue ${queueLength}`);
 
 export const fileKey = (file) => `${file.username}\n${file.path}`;
 
@@ -45,7 +52,7 @@ function extensionOf(path) {
 }
 
 // Port of album_candidates: one group per user and folder. Adds to `groups` in place.
-export function groupAlbumFiles(groups, { username, files }, limit = RESULT_LIMIT) {
+export function groupAlbumFiles(groups, { username, freeSlot, queueLength, uploadSpeed, files }, limit = RESULT_LIMIT) {
   for (const { path } of files) {
     const extension = extensionOf(path);
     const folder = parentFolder(path);
@@ -54,7 +61,7 @@ export function groupAlbumFiles(groups, { username, files }, limit = RESULT_LIMI
     let group = groups.get(key);
     if (!group && groups.size >= limit) continue;
     if (!group) {
-      group = { username, folder, name: baseName(folder), songs: 0, format: extension, counts: new Map(), paths: new Set() };
+      group = { username, freeSlot, queueLength, uploadSpeed, folder, name: baseName(folder), songs: 0, format: extension, counts: new Map(), paths: new Set() };
       groups.set(key, group);
     }
     if (group.paths.has(path)) continue;
@@ -76,7 +83,7 @@ export function newAccount(random = (length) => crypto.getRandomValues(new Uint8
   return { username: `clipplus${hex(random(5))}`, password: hex(random(24)) };
 }
 
-export const albumDetails = ({ username, songs, format }) => [username, plural(songs, 'song'), format].join(' · ');
+export const albumDetails = (group) => [group.username, queueText(group), plural(group.songs, 'song'), group.format].join(' · ');
 
 export function formatSize(bytes) {
   return `${(bytes / 1e6).toFixed(1)} MB`;
@@ -90,6 +97,7 @@ export function formatDuration(seconds) {
 export function fileDetails(file) {
   return [
     file.username,
+    queueText(file),
     formatSize(file.size),
     file.bitrate && `${file.bitrate} kbps`,
     file.duration && formatDuration(file.duration),

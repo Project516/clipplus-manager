@@ -255,7 +255,12 @@ Kirigami.Page {
                         }
                         Controls.Label {
                             Layout.fillWidth: true
-                            text: page.albumMode ? modelData.username : modelData.username + " · " + (modelData.size / 1000000).toFixed(1) + " MB" + (modelData.bitrate ? " · " + modelData.bitrate + " kbps" : "") + (modelData.length ? " · " + page.duration(modelData.length * 1000) : "")
+                            text: {
+                                const peer = modelData.username + " · " + (modelData.free_slot ? "free slot" : "queue " + modelData.queue_length);
+                                if (page.albumMode)
+                                    return peer;
+                                return peer + " · " + (modelData.size / 1000000).toFixed(1) + " MB" + (modelData.bitrate ? " · " + modelData.bitrate + " kbps" : "") + (modelData.length ? " · " + page.duration(modelData.length * 1000) : "");
+                            }
                             textFormat: Text.PlainText
                             elide: Text.ElideRight
                             color: Kirigami.Theme.disabledTextColor
