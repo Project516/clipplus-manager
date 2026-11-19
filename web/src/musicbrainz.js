@@ -5,7 +5,8 @@ const ENDPOINT = 'https://musicbrainz.org/ws/2/recording/';
 
 // Lowercase words made of letters, digits and apostrophes.
 export function words(text) {
-  return (text.toLowerCase().replaceAll('\u2019', "'").match(/[\p{L}\p{M}\p{N}']+/gu) ?? [])
+  // No \p{M}: Rust's is_alphanumeric splits on combining marks, and the two must rank alike.
+  return (text.toLowerCase().replaceAll('\u2019', "'").match(/[\p{L}\p{N}']+/gu) ?? [])
     .filter((word) => /[\p{L}\p{N}]/u.test(word));
 }
 

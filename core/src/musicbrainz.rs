@@ -96,10 +96,22 @@ fn words(text: &str) -> Vec<String> {
 
 /// Search recordings. Call from a worker thread: MusicBrainz limits requests to one per second.
 pub fn search(query: &str) -> Result<Vec<Recording>, String> {
-    static LAST_REQUEST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
     if words(query).is_empty() {
         return Ok(Vec::new());
     }
+    search_with_retry(
+        &crate::net::agent(),
+        ENDPOINT,
+        query,
+        Duration::from_secs(2),
+        pace,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Waits until a second has passed since the last request, then records this one.
+fn pace() {
+    static LAST_REQUEST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
     let mut last = LAST_REQUEST
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -108,25 +120,21 @@ pub fn search(query: &str) -> Result<Vec<Recording>, String> {
         std::thread::sleep(wait);
     }
     *last = Some(Instant::now());
-    drop(last);
-    search_with_retry(
-        &crate::net::agent(),
-        ENDPOINT,
-        query,
-        Duration::from_secs(2),
-    )
-    .map_err(|e| e.to_string())
 }
 
+// `pace` runs before every attempt, so a retry also counts against the limit.
 fn search_with_retry(
     agent: &ureq::Agent,
     endpoint: &str,
     query: &str,
     delay: Duration,
+    pace: fn(),
 ) -> Result<Vec<Recording>, SearchError> {
+    pace();
     match search_at(agent, endpoint, query) {
         Err(SearchError::Busy) => {
             std::thread::sleep(delay);
+            pace();
             search_at(agent, endpoint, query)
         }
         other => other,
@@ -247,6 +255,7 @@ mod tests {
     use serde_json::{Value, json};
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread::JoinHandle;
 
     fn ok(body: &str) -> String {
@@ -338,6 +347,8 @@ mod tests {
         assert_eq!(words(" Toto  AFRICA "), ["toto", "africa"]);
         assert_eq!(words("AC/DC & t.n.t"), ["ac", "dc", "t", "n", "t"]);
         assert_eq!(words("Don\u{2019}t Stop 99 - '"), ["don't", "stop", "99"]);
+        // A combining accent splits the word, the same as in web/src/musicbrainz.js.
+        assert_eq!(words("Cafe\u{301} Band"), ["cafe", "band"]);
     }
 
     #[test]
@@ -405,21 +416,39 @@ mod tests {
     fn retries_once_when_busy() {
         let body = json!({"recordings": [recording("a", "Song", "Band", 1, vec![])]}).to_string();
         let busy_body = ok(r#"{"error":"Your requests are exceeding the allowable rate limit."}"#);
+        static PACED: AtomicUsize = AtomicUsize::new(0);
+        fn count() {
+            PACED.fetch_add(1, Ordering::SeqCst);
+        }
         for busy in [BUSY.to_string(), busy_body] {
             let (endpoint, server) = serve(vec![busy, ok(&body)]);
-            let results =
-                search_with_retry(&crate::net::agent(), &endpoint, "band song", Duration::ZERO)
-                    .unwrap();
+            let before = PACED.load(Ordering::SeqCst);
+            let results = search_with_retry(
+                &crate::net::agent(),
+                &endpoint,
+                "band song",
+                Duration::ZERO,
+                count,
+            )
+            .unwrap();
             assert_eq!(server.join().unwrap().len(), 2);
             assert_eq!(results.len(), 1);
+            // The retry is paced too.
+            assert_eq!(PACED.load(Ordering::SeqCst) - before, 2);
         }
     }
 
     #[test]
     fn gives_up_after_one_retry() {
         let (endpoint, server) = serve(vec![BUSY.to_string(), BUSY.to_string()]);
-        let error = search_with_retry(&crate::net::agent(), &endpoint, "band song", Duration::ZERO)
-            .unwrap_err();
+        let error = search_with_retry(
+            &crate::net::agent(),
+            &endpoint,
+            "band song",
+            Duration::ZERO,
+            || {},
+        )
+        .unwrap_err();
         assert_eq!(server.join().unwrap().len(), 2);
         assert!(error.to_string().contains("busy"));
     }

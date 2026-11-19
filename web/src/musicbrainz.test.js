@@ -11,6 +11,8 @@ test('splits words on anything but letters, digits and apostrophes', () => {
   assert.deepEqual(words('AC/DC & t.n.t'), ['ac', 'dc', 't', 'n', 't']);
   assert.deepEqual(words('Don\u2019t Stop 99 - \''), ["don't", 'stop', '99']);
   assert.deepEqual(words('Beyonc\u00e9'), ['beyonc\u00e9']);
+  // A combining accent splits the word, the same as in core/src/musicbrainz.rs.
+  assert.deepEqual(words('Cafe\u0301 Band'), ['cafe', 'band']);
   assert.deepEqual(words(' & - '), []);
 });
 
