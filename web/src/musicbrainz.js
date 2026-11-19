@@ -5,9 +5,9 @@ const ENDPOINT = 'https://musicbrainz.org/ws/2/recording/';
 
 // Lowercase words made of letters, digits and apostrophes.
 export function words(text) {
-  // No \p{M}: Rust's is_alphanumeric splits on combining marks, and the two must rank alike.
-  return (text.toLowerCase().replaceAll('\u2019', "'").match(/[\p{L}\p{N}']+/gu) ?? [])
-    .filter((word) => /[\p{L}\p{N}]/u.test(word));
+  // Alphabetic plus numbers is Rust's is_alphanumeric, so desktop and web split words alike.
+  return (text.toLowerCase().replaceAll('\u2019', "'").match(/[\p{Alphabetic}\p{N}']+/gu) ?? [])
+    .filter((word) => /[\p{Alphabetic}\p{N}]/u.test(word));
 }
 
 // Lower is better: official studio albums first, then the earliest.

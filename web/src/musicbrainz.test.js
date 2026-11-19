@@ -13,6 +13,8 @@ test('splits words on anything but letters, digits and apostrophes', () => {
   assert.deepEqual(words('Beyonc\u00e9'), ['beyonc\u00e9']);
   // A combining accent splits the word, the same as in core/src/musicbrainz.rs.
   assert.deepEqual(words('Cafe\u0301 Band'), ['cafe', 'band']);
+  // An alphabetic vowel sign stays in the word.
+  assert.deepEqual(words('Band \u0915\u093e'), ['band', '\u0915\u093e']);
   assert.deepEqual(words(' & - '), []);
 });
 

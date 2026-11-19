@@ -349,6 +349,8 @@ mod tests {
         assert_eq!(words("Don\u{2019}t Stop 99 - '"), ["don't", "stop", "99"]);
         // A combining accent splits the word, the same as in web/src/musicbrainz.js.
         assert_eq!(words("Cafe\u{301} Band"), ["cafe", "band"]);
+        // An alphabetic vowel sign stays in the word.
+        assert_eq!(words("Band \u{915}\u{93e}"), ["band", "\u{915}\u{93e}"]);
     }
 
     #[test]
