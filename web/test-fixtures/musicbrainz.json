@@ -5,6 +5,7 @@
   "recordings": [
     {
       "id": "00000000-0000-4000-8000-000000000004",
+      "score": 100,
       "title": "Northern Lights (Live)",
       "length": 287000,
       "artist-credit": [{ "name": "The Glass Harbor" }],
@@ -19,6 +20,7 @@
     },
     {
       "id": "00000000-0000-4000-8000-000000000001",
+      "score": 95,
       "title": "Northern Lights",
       "length": 241000,
       "artist-credit": [{ "name": "The Glass Harbor" }],
@@ -45,6 +47,7 @@
     },
     {
       "id": "00000000-0000-4000-8000-000000000005",
+      "score": 60,
       "title": "northern lights",
       "length": 240000,
       "artist-credit": [{ "name": "the glass harbor" }],
@@ -59,6 +62,7 @@
     },
     {
       "id": "00000000-0000-4000-8000-000000000002",
+      "score": 90,
       "title": "Northern Lights",
       "length": 198000,
       "artist-credit": [
@@ -76,12 +80,14 @@
     },
     {
       "id": "00000000-0000-4000-8000-000000000003",
+      "score": 80,
       "title": "Lantern",
       "artist-credit": [{ "name": "The Glass Harbor" }],
       "releases": []
     },
     {
       "id": "00000000-0000-4000-8000-000000000006",
+      "score": 50,
       "title": "Salt Air"
     }
   ]
