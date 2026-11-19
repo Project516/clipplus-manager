@@ -40,12 +40,12 @@ export async function connectClient({ relayURL, relayToken, username, password }
         onResult(result);
       }
     },
-    async download(user, path, { signal, onProgress } = {}) {
-      fixture.downloads.push({ user, path });
+    async download(user, path, { size, signal, onProgress } = {}) {
+      fixture.downloads.push({ user, path, size });
       onProgress?.({ state: 'connecting' });
       await tick();
       if (path.endsWith('Missing.mp3')) {
-        throw Object.assign(new Error('Download failed'), { name: 'DownloadError', reason: 'File not shared.' });
+        throw Object.assign(new Error('Download failed'), { name: 'DownloadError', reason: 'The user is offline' });
       }
       onProgress?.({ state: 'queued', position: 2 });
       if (path.endsWith('Slow.flac')) await aborted(signal);

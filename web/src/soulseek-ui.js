@@ -180,6 +180,7 @@ async function download(file) {
   show(describeProgress({ state: 'connecting' }));
   try {
     const blob = await client.download(file.username, file.path, {
+      size: file.size,
       signal: controller.signal,
       onProgress: (progress) => {
         if (!controller.signal.aborted) show(describeProgress(progress));

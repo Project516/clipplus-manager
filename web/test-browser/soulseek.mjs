@@ -71,10 +71,15 @@ test('signs in, searches, downloads, and saves a song with a mock client', { tim
   const [saved] = await Promise.all([page.waitForEvent('download'), save.click()]);
   assert.equal(saved.suggestedFilename(), '01 Song.mp3');
   assert.equal(await readFile(await saved.path(), 'utf8'), 'fixture:Music\\Album\\01 Song.mp3');
+  assert.deepEqual(await page.evaluate(() => globalThis.nicotineMock.downloads.at(-1)), {
+    user: 'queue-user',
+    path: 'Music\\Album\\01 Song.mp3',
+    size: 5_000_000,
+  });
 
   await row('04 Missing.mp3').click();
   await downloadButton.click();
-  await page.getByText('Download failed: File not shared.', { exact: true }).waitFor();
+  await page.getByText('Download failed: The user is offline', { exact: true }).waitFor();
 
   await row('03 Slow.flac').click();
   await downloadButton.click();
