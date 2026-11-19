@@ -325,6 +325,8 @@ async function download(file, metadata) {
   } catch (error) {
     if (signal.aborted) {
       job.show({ text: 'Canceled' });
+      // After sign-out the status already says why everything stopped.
+      if (client) status.textContent = `Canceled ${file.name}.`;
     } else {
       job.show({ text: error.message }, 'failed');
       status.textContent = `${file.name}: ${error.message}`;
@@ -369,7 +371,7 @@ async function downloadAlbum(username, folder) {
       const report = ({ text: message, fraction }, phase) => {
         lines[index].textContent = `${file.name} · ${message}`;
         const song = phase === 'fix' ? 1 : fraction ?? 0;
-        job.show({ text: `${ready.length} of ${total} songs ready`, fraction: (ready.length + song) / total });
+        job.show({ text: `${ready.length} of ${total} songs ready`, fraction: (index + song) / total });
       };
       try {
         const fixed = await fetchFixed(connection, username, file, signal, report);
@@ -397,6 +399,7 @@ async function downloadAlbum(username, folder) {
         if (!line.className) line.textContent = `${songFiles[index].name} · canceled`;
       });
       job.show({ text: total ? `Canceled · ${ready.length} of ${total} songs were ready` : 'Canceled' });
+      if (client) status.textContent = `Canceled ${title}.`;
     } else {
       job.show({ text: error.message }, 'failed');
       status.textContent = `${title}: ${error.message}`;

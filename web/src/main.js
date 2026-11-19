@@ -64,6 +64,9 @@ $('#download-form').addEventListener('submit', async (event) => {
   if (!proxy.value.trim()) {
     screen('Set up a proxy', 'Add your proxy URL in Settings.', undefined, true);
     location.hash = '#settings';
+    // hashchange runs later, and a hidden field cannot take focus.
+    showPage();
+    $('#settings-status').textContent = 'Add your proxy URL to make MP3s.';
     proxy.focus();
     return;
   }

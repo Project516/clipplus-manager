@@ -332,3 +332,13 @@ test('makes a Soulseek account when the login is left empty, and reuses it', { t
   await signInWithToken();
   assert.equal((await mock(() => globalThis.nicotineMock.connections.at(-1))).username, username);
 });
+
+test('sends a YouTube download without a proxy to Settings', { timeout: 60_000 }, async (t) => {
+  const { page } = await open(t);
+  await page.getByRole('navigation').getByRole('link', { name: 'Downloads' }).click();
+  await page.getByLabel('YouTube link').fill('https://www.youtube.com/watch?v=fixture');
+  await page.getByRole('button', { name: 'Make MP3' }).click();
+  await page.getByText('Add your proxy URL to make MP3s.', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('heading', { name: 'Settings', level: 1 }).isVisible(), true);
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'proxy');
+});
