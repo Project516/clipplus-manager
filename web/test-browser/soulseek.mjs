@@ -130,9 +130,10 @@ test('signs in, finds a song, downloads, and saves it with a mock client', { tim
   assert.equal(musicbrainzRequests.length, 1);
   assert.equal(musicbrainzRequests[0].pathname, '/ws/2/recording/');
   assert.equal(musicbrainzRequests[0].searchParams.get('fmt'), 'json');
-  assert.match(musicbrainzRequests[0].searchParams.get('query'), /^\(artist:glass OR recording:glass\) AND /);
+  assert.equal(musicbrainzRequests[0].searchParams.get('query'), 'glass harbor northern lights');
+  assert.equal(musicbrainzRequests[0].searchParams.get('dismax'), 'true');
   const songs = page.locator('#soulseek-songs label');
-  assert.deepEqual(await songs.locator('.file-name').allTextContents(), ['Northern Lights', 'Northern Lights', 'Northern Lights (Live)', 'Lantern', 'Salt Air']);
+  assert.deepEqual(await songs.locator('.file-name').allTextContents(), ['Northern Lights', 'Northern Lights (Live)', 'Lantern', 'Salt Air', 'Northern Lights']);
   assert.equal(await songs.first().locator('.file-details').textContent(), 'The Glass Harbor · Tidewater · 4:01');
   const findButton = page.getByRole('button', { name: 'Find downloads' });
   assert.equal(await findButton.isDisabled(), true);
