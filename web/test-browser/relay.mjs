@@ -17,7 +17,7 @@ const runtimeFiles = new Map([
   ['python_stdlib.zip', 'application/zip'],
 ]);
 
-test('the production build signs in and sends a search through a relay fixture', { timeout: 60_000 }, async (t) => {
+test('the production build connects from saved settings and sends a search through a relay fixture', { timeout: 60_000 }, async (t) => {
   const server = await preview({ preview: { host: '127.0.0.1', port: 0 } });
   t.after(() => server.close());
   const browser = await chromium.launch({ channel: 'chrome' });
@@ -55,12 +55,12 @@ test('the production build signs in and sends a search through a relay fixture',
 
   await page.goto(`${origin}/#settings`);
   await page.getByLabel('Relay URL').fill(relayURL);
-  await page.locator('#relay-form').getByRole('button', { name: 'Save settings' }).click();
-  await page.getByRole('navigation').getByRole('link', { name: 'Soulseek' }).click();
   await page.getByLabel('Relay token').fill('fixture-token');
   await page.getByLabel('Soulseek username').fill('fixture-user');
   await page.getByLabel('Soulseek password').fill('fixture-password');
-  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.locator('#relay-form').getByRole('button', { name: 'Save settings' }).click();
+  await page.getByText('Settings saved.', { exact: true }).waitFor();
+  await page.getByRole('navigation').getByRole('link', { name: 'Soulseek' }).click();
   await page.getByText('Connected to Soulseek', { exact: true }).waitFor();
   assert.equal(sent[0], 'fixture-token');
   assert.equal(sent[1].readUInt32LE(4), 1);

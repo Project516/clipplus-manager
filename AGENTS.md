@@ -66,5 +66,5 @@ pnpm run test:browser
 - **Self update**: the AppImage replaces itself from this repo's latest release, then asks for a restart.
 - **OF**: the stock SanDisk firmware file, `clppa.bin`.
 - **Bootloader**: the Rockbox bootloader patched into the OF. The player flashes it after unplug.
-- **Relay**: the user's own WebSocket server that carries the browser's Soulseek connections. Its URL is saved in the browser; the token is entered at each sign-in.
+- **Relay**: the user's own WebSocket server that carries the browser's Soulseek connections. Its URL and token are saved in the browser with the other Soulseek settings.
 - **Fixture build**: `vite build --mode fixture`, the site with `test-browser/nicotine-mock.js` in place of the Soulseek package.
