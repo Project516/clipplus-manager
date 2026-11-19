@@ -47,18 +47,12 @@
     <header class="page-header"><h1 id="soulseek-title">Soulseek</h1></header>
 
     <div class="settings">
-      <p>Find a song or an album and save it for your Clip+. Files come from Soulseek through your own secure WebSocket relay, which you set up in <a href="#settings">Settings</a>.</p>
-      <form id="soulseek-login" autocomplete="off">
-        <p id="relay-access" hidden>If your relay uses Cloudflare Access, <a id="relay-access-link" target="_blank" rel="noopener noreferrer">sign in to the relay in a new tab</a>. When the page shows <code>ok</code>, return here and enter your relay token.</p>
-        <label for="relay-token">Relay token</label>
-        <input id="relay-token" type="password" required>
-        <label for="soulseek-user">Soulseek username <span>(optional)</span></label>
-        <input id="soulseek-user" autocomplete="off">
-        <label for="soulseek-password">Soulseek password <span>(optional)</span></label>
-        <input id="soulseek-password" type="password" autocomplete="off">
-        <p class="note">Leave both empty and this browser makes a Soulseek account for you and keeps it, like the desktop app.</p>
-        <div class="settings-actions"><button type="submit">Sign in</button></div>
-      </form>
+      <p>Find a song or an album and save it for your Clip+. Files come from Soulseek through your own secure WebSocket relay.</p>
+      <div id="soulseek-signin">
+        <p id="soulseek-setup" hidden>Set up Soulseek in <a href="#settings">Settings</a> first.</p>
+        <p id="relay-access" hidden>If your relay uses Cloudflare Access, <a id="relay-access-link" target="_blank" rel="noopener noreferrer">sign in to the relay in a new tab</a>. When the page shows <code>ok</code>, return here and connect.</p>
+        <div class="settings-actions"><button id="soulseek-connect" type="button" hidden>Connect</button></div>
+      </div>
       <div id="soulseek-session" hidden>
         <label for="soulseek-mode">Search for</label>
         <select id="soulseek-mode"><option value="song">Song</option><option value="album">Album</option></select>
@@ -121,12 +115,20 @@
     <section class="settings" aria-labelledby="relay-heading">
       <h2 id="relay-heading">Soulseek relay</h2>
       <p>Soulseek search and downloads go through your own secure WebSocket relay. The relay must allow this site's address.</p>
-      <form id="relay-form">
+      <form id="relay-form" autocomplete="off">
         <label for="relay-url">Relay URL <span>(wss://)</span></label>
         <input id="relay-url" type="url" placeholder="wss://relay.example.com/relay" required>
-        <div class="settings-actions"><button type="submit">Save settings</button><span id="relay-status" role="status"></span></div>
+        <label for="relay-token">Relay token</label>
+        <input id="relay-token" type="password" autocomplete="off">
+        <label for="soulseek-user">Soulseek username <span>(optional)</span></label>
+        <input id="soulseek-user" autocomplete="off">
+        <label for="soulseek-password">Soulseek password <span>(optional)</span></label>
+        <input id="soulseek-password" type="password" autocomplete="off">
+        <div class="settings-actions"><button type="submit" class="secondary">Save settings</button><span id="relay-status" role="status"></span></div>
       </form>
-      <p class="note">Your relay URL stays in this browser. You enter the relay token each time you sign in.</p>
+      <p class="note">Your relay URL, token and Soulseek login stay in this browser.</p>
+      <p class="note">Leave the username and password empty to use an account this browser makes for you, like the desktop app.</p>
+      <p class="note" id="browser-account" hidden></p>
     </section>
     </section>
   </main>

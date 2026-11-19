@@ -37,7 +37,7 @@ function aborted(signal) {
 }
 
 export async function connectClient({ relayURL, relayToken, username, password }) {
-  fixture.connections.push({ relayURL, relayToken, username });
+  fixture.connections.push({ relayURL, relayToken, username, password });
   await tick();
   // The browser account has a 48-character hex password.
   if (password !== 'fixture-password' && !/^[0-9a-f]{48}$/.test(password)) {

@@ -31,29 +31,30 @@ async function open(t) {
   });
 
   await page.goto(origin);
-  await page.getByRole('navigation').getByRole('link', { name: 'Soulseek' }).click();
-  const signIn = async (password) => {
-    await page.getByLabel('Relay token').fill('fixture-token');
-    await page.getByLabel('Soulseek username').fill('fixture-user');
-    await page.getByLabel('Soulseek password').fill(password);
-    await page.getByRole('button', { name: 'Sign in' }).click();
-  };
   const mock = (read) => page.evaluate(read);
-  const saveRelay = async () => {
-    await page.getByRole('navigation').getByRole('link', { name: 'Settings' }).click();
-    await page.getByLabel('Relay URL').fill(relayURL);
+  const goTo = (name) => page.getByRole('navigation').getByRole('link', { name }).click();
+  const defaults = { url: relayURL, token: 'fixture-token', user: 'fixture-user', password: 'fixture-password' };
+  const saveSettings = async (values = {}) => {
+    const form = { ...defaults, ...values };
+    await goTo('Settings');
+    await page.getByLabel('Relay URL').fill(form.url);
+    await page.getByLabel('Relay token').fill(form.token);
+    await page.getByLabel('Soulseek username').fill(form.user);
+    await page.getByLabel('Soulseek password').fill(form.password);
     await page.locator('#relay-form').getByRole('button', { name: 'Save settings' }).click();
     await page.getByText('Settings saved.', { exact: true }).waitFor();
-    await page.getByRole('navigation').getByRole('link', { name: 'Soulseek' }).click();
   };
-  return { page, signIn, mock, saveRelay, musicbrainzRequests };
+  // The mock loads on the first connect.
+  const connections = () => mock(() => globalThis.nicotineMock?.connections ?? []);
+  const connected = () => page.getByText('Connected to Soulseek', { exact: true }).waitFor();
+  return { page, goTo, mock, saveSettings, connections, connected, musicbrainzRequests };
 }
 
 async function signedIn(t) {
   const opened = await open(t);
-  await opened.saveRelay();
-  await opened.signIn('fixture-password');
-  await opened.page.getByText('Connected to Soulseek', { exact: true }).waitFor();
+  await opened.saveSettings();
+  await opened.goTo('Soulseek');
+  await opened.connected();
   return opened;
 }
 
@@ -93,34 +94,31 @@ async function saveAs(page, linkName) {
   return { name: saved.suggestedFilename(), bytes: await readFile(await saved.path()) };
 }
 
-test('signs in, finds a song, downloads, and saves it with a mock client', { timeout: 120_000 }, async (t) => {
-  const { page, signIn, mock, saveRelay, musicbrainzRequests } = await open(t);
+test('connects from saved settings, finds a song, downloads, and saves it with a mock client', { timeout: 120_000 }, async (t) => {
+  const { page, goTo, mock, saveSettings, connected, musicbrainzRequests } = await open(t);
 
-  await page.getByLabel('Relay token').fill('fixture-token');
-  await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.getByText('Add your relay URL in Settings first.', { exact: true }).waitFor();
-  await saveRelay();
+  await saveSettings({ password: 'wrong-password' });
+  await goTo('Soulseek');
+  await page.getByText('Soulseek rejected the sign-in: INVALIDPASS', { exact: true }).waitFor();
   const healthPagePromise = page.waitForEvent('popup');
   await page.getByRole('link', { name: 'sign in to the relay in a new tab' }).click();
   const healthPage = await healthPagePromise;
   await healthPage.getByText('ok', { exact: true }).waitFor();
   assert.equal(healthPage.url(), healthURL);
   await healthPage.close();
+
   await page.reload();
   assert.equal(await page.getByRole('heading', { name: 'Soulseek', level: 1 }).isVisible(), true);
-  assert.equal(await page.getByLabel('Relay URL').inputValue(), relayURL);
-
-  await signIn('wrong-password');
   await page.getByText('Soulseek rejected the sign-in: INVALIDPASS', { exact: true }).waitFor();
-  assert.equal(await page.getByLabel('Relay token').inputValue(), '');
-  assert.equal(await page.getByLabel('Soulseek password').inputValue(), '');
-
-  await signIn('fixture-password');
-  await page.getByText('Connected to Soulseek', { exact: true }).waitFor();
+  await saveSettings();
+  await goTo('Soulseek');
+  await page.getByRole('button', { name: 'Connect', exact: true }).click();
+  await connected();
   assert.deepEqual(await mock(() => globalThis.nicotineMock.connections.at(-1)), {
     relayURL,
     relayToken: 'fixture-token',
     username: 'fixture-user',
+    password: 'fixture-password',
   });
   await page.getByText('Search MusicBrainz for a song', { exact: true }).waitFor();
 
@@ -212,14 +210,15 @@ test('signs in, finds a song, downloads, and saves it with a mock client', { tim
 
   await page.evaluate(() => globalThis.nicotineMock.drop());
   await page.getByText('Canceled', { exact: true }).nth(1).waitFor();
-  assert.equal(await page.locator('#soulseek-status').textContent(), 'Relay disconnected. Sign in to reconnect.');
-  await page.getByRole('button', { name: 'Sign in' }).waitFor();
+  assert.equal(await page.locator('#soulseek-status').textContent(), 'Relay disconnected. Connect to try again.');
+  await page.getByRole('button', { name: 'Connect', exact: true }).waitFor();
   await page.getByRole('link', { name: 'Save 01 Song.mp3' }).waitFor();
   await page.getByRole('button', { name: 'Clear finished' }).click();
   await page.getByRole('heading', { name: 'Downloads', level: 2 }).waitFor({ state: 'hidden' });
   assert.equal(musicbrainzRequests.length, 1, 'one MusicBrainz request for one search');
 
-  await signIn('fixture-password');
+  await page.getByRole('button', { name: 'Connect', exact: true }).click();
+  await connected();
   await page.getByRole('button', { name: 'Disconnect' }).click();
   await page.getByText('Disconnected.', { exact: true }).waitFor();
   assert.ok(await page.evaluate(() => globalThis.nicotineMock.closedByApp) >= 2);
@@ -309,30 +308,115 @@ test('finds an album folder, saves its songs as a zip, and cancels the rest', { 
   assert.equal(await mock(() => globalThis.nicotineMock.downloads.some((entry) => entry.path.endsWith('Tide.flac'))), false);
 });
 
-test('makes a Soulseek account when the login is left empty, and reuses it', { timeout: 60_000 }, async (t) => {
-  const { page, mock, saveRelay } = await open(t);
-  const signInWithToken = async () => {
-    await page.getByLabel('Relay token').fill('fixture-token');
-    await page.getByRole('button', { name: 'Sign in' }).click();
-    await page.getByText('Connected to Soulseek', { exact: true }).waitFor();
-  };
-  await saveRelay();
-  await page.getByLabel('Relay token').fill('fixture-token');
-  await page.getByLabel('Soulseek username').fill('only-a-name');
-  await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.getByText(/^Enter both your Soulseek username and password/).waitFor();
-  await page.getByLabel('Soulseek username').fill('');
+test('saved settings keep all four values after a reload', { timeout: 60_000 }, async (t) => {
+  const { page, goTo, saveSettings, connections } = await open(t);
+  await saveSettings({ user: 'saved-user', password: 'saved-password' });
+  await page.reload();
+  await goTo('Settings');
+  assert.equal(await page.getByLabel('Relay URL').inputValue(), relayURL);
+  assert.equal(await page.getByLabel('Relay token').inputValue(), 'fixture-token');
+  assert.equal(await page.getByLabel('Soulseek username').inputValue(), 'saved-user');
+  assert.equal(await page.getByLabel('Soulseek password').inputValue(), 'saved-password');
+  assert.equal((await connections()).length, 0, 'saving does not connect');
+});
 
-  await signInWithToken();
-  const { username } = await mock(() => globalThis.nicotineMock.connections.at(-1));
-  assert.match(username, /^clipplus[0-9a-f]{10}$/);
-  await page.getByText(`Signed in to Soulseek as ${username}.`, { exact: true }).waitFor();
-  assert.equal(await page.getByLabel('Soulseek password').inputValue(), '');
+test('rejects a bad relay URL or half a login when saving', { timeout: 60_000 }, async (t) => {
+  const { page, goTo } = await open(t);
+  await goTo('Settings');
+  const save = page.locator('#relay-form').getByRole('button', { name: 'Save settings' });
+  await page.getByLabel('Relay URL').fill('https://relay.invalid/socket');
+  await save.click();
+  await page.getByText(/^Enter a wss:\/\/ relay URL/).waitFor();
+  await page.getByLabel('Relay URL').fill(relayURL);
+  await page.getByLabel('Soulseek username').fill('only-a-name');
+  await save.click();
+  await page.getByText(/^Enter both the Soulseek username and password, or leave both empty/).waitFor();
+  assert.equal(await page.evaluate(() => localStorage.getItem('soulseekRelayURL')), null);
+});
+
+test('asks for Soulseek settings first and does not connect without a token', { timeout: 60_000 }, async (t) => {
+  const { page, goTo, saveSettings, connections, connected } = await open(t);
+  await goTo('Soulseek');
+  await page.getByText('Set up Soulseek in Settings first.', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Connect', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('link', { name: 'sign in to the relay in a new tab' }).isVisible(), false);
+
+  await saveSettings({ token: '' });
+  await goTo('Soulseek');
+  await page.getByText('Set up Soulseek in Settings first.', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('link', { name: 'sign in to the relay in a new tab' }).isVisible(), true);
+  await page.waitForTimeout(300);
+  assert.equal((await connections()).length, 0);
+  assert.equal(await page.getByRole('button', { name: 'Connect', exact: true }).count(), 0);
+
+  await page.locator('#soulseek-setup').getByRole('link', { name: 'Settings' }).click();
+  await page.getByRole('heading', { name: 'Settings', level: 1 }).waitFor();
+  await saveSettings();
+  await goTo('Soulseek');
+  await connected();
+  assert.equal((await connections()).length, 1, 'the first visit with full settings connects');
+});
+
+test('connects on the first visit, stays disconnected after Disconnect, and connects again on request', { timeout: 60_000 }, async (t) => {
+  const { page, goTo, saveSettings, connections, connected } = await open(t);
+  await saveSettings();
+  await goTo('Soulseek');
+  await connected();
+  assert.equal((await connections()).length, 1);
 
   await page.getByRole('button', { name: 'Disconnect' }).click();
+  await page.getByText('Disconnected.', { exact: true }).waitFor();
+  const connect = page.getByRole('button', { name: 'Connect', exact: true });
+  await connect.waitFor();
+  await goTo('Downloads');
+  await goTo('Soulseek');
+  await page.waitForTimeout(300);
+  assert.equal((await connections()).length, 1, 'opening the page again does not reconnect');
+  assert.equal(await connect.isVisible(), true);
+
+  await connect.click();
+  await connected();
+  assert.equal((await connections()).length, 2);
+});
+
+test('uses a typed Soulseek login as given', { timeout: 60_000 }, async (t) => {
+  const { page, goTo, saveSettings, connections, connected } = await open(t);
+  await saveSettings({ user: 'typed-user' });
+  await goTo('Soulseek');
+  await connected();
+  await page.getByText('Signed in to Soulseek as typed-user.', { exact: true }).waitFor();
+  assert.deepEqual((await connections()).at(-1), {
+    relayURL,
+    relayToken: 'fixture-token',
+    username: 'typed-user',
+    password: 'fixture-password',
+  });
+  await goTo('Settings');
+  assert.equal(await page.locator('#browser-account').isHidden(), true);
+  assert.equal(await page.evaluate(() => localStorage.getItem('soulseekAccount')), null);
+});
+
+test('makes a Soulseek account when the login is left empty, reuses it, and shows its name in Settings', { timeout: 60_000 }, async (t) => {
+  const { page, goTo, saveSettings, connections, connected } = await open(t);
+  await saveSettings({ user: '', password: '' });
+  assert.equal(await page.locator('#browser-account').isHidden(), true);
+  await goTo('Soulseek');
+  await connected();
+  const { username, password } = (await connections()).at(-1);
+  assert.match(username, /^clipplus[0-9a-f]{10}$/);
+  assert.match(password, /^[0-9a-f]{48}$/);
+  await page.getByText(`Signed in to Soulseek as ${username}.`, { exact: true }).waitFor();
+  await goTo('Settings');
+  await page.getByText(`This browser's account: ${username}`, { exact: true }).waitFor();
+  assert.equal(await page.getByLabel('Soulseek username').inputValue(), '');
+  assert.equal(await page.getByLabel('Soulseek password').inputValue(), '');
+
   await page.reload();
-  await signInWithToken();
-  assert.equal((await mock(() => globalThis.nicotineMock.connections.at(-1))).username, username);
+  await page.getByText(`This browser's account: ${username}`, { exact: true }).waitFor();
+  await goTo('Soulseek');
+  await connected();
+  assert.deepEqual((await connections()).at(-1).username, username);
+  assert.equal((await connections()).at(-1).password, password);
 });
 
 test('sends a YouTube download without a proxy to Settings', { timeout: 60_000 }, async (t) => {

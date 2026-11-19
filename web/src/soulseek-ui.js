@@ -10,16 +10,23 @@ import {
 import { uniqueName, zipStored } from './zip.js';
 
 const $ = (selector) => document.querySelector(selector);
-const loginForm = $('#soulseek-login');
+const signin = $('#soulseek-signin');
+const setupHint = $('#soulseek-setup');
+const connectButton = $('#soulseek-connect');
 const searchForm = $('#soulseek-search');
 const mode = $('#soulseek-mode');
 const query = $('#soulseek-query');
 const queryLabel = $('#soulseek-query-label');
 const searchButton = searchForm.querySelector('button');
+const relayForm = $('#relay-form');
 const relayURL = $('#relay-url');
+const relayToken = $('#relay-token');
+const loginUser = $('#soulseek-user');
+const loginPassword = $('#soulseek-password');
+const accountNote = $('#browser-account');
 const relayAccess = $('#relay-access');
 const relayAccessLink = $('#relay-access-link');
-const relayURLKey = 'soulseekRelayURL';
+const settingKeys = { relayURL: 'soulseekRelayURL', relayToken: 'soulseekRelayToken', username: 'soulseekUser', password: 'soulseekPassword' };
 const accountKey = 'soulseekAccount';
 const status = $('#soulseek-status');
 const session = $('#soulseek-session');
@@ -45,7 +52,11 @@ const hints = {
 };
 
 let client;
-let savedRelay = '';
+let connecting = false;
+let autoConnected = false;
+let account;
+// The saved settings, so a connect uses what Save settings stored, not unsaved typing.
+const settings = { relayURL: '', relayToken: '', username: '', password: '' };
 let search;
 let step = 'search';
 let songs = [];
@@ -62,37 +73,88 @@ const isFolder = (row) => 'folder' in row;
 const rowKey = (row) => (isFolder(row) ? albumKey(row.username, row.folder) : fileKey(row));
 const rowDetails = (row) => (isFolder(row) ? albumDetails(row) : fileDetails(row));
 
-function updateRelayAccess() {
+function savedRelayURL() {
   try {
-    const healthURL = new URL('/healthz', secureRelayURL(savedRelay));
-    healthURL.protocol = 'https:';
-    relayAccessLink.href = healthURL.href;
-    relayAccess.hidden = false;
+    return secureRelayURL(settings.relayURL);
   } catch {
-    relayAccessLink.removeAttribute('href');
-    relayAccess.hidden = true;
+    return undefined;
   }
 }
 
-try {
-  savedRelay = localStorage.getItem(relayURLKey) || '';
-} catch { /* Storage can be disabled. */ }
-relayURL.value = savedRelay;
-updateRelayAccess();
+// The Access link shows with any saved relay URL: a failed connect is where it helps.
+function updateSignin() {
+  const url = savedRelayURL();
+  const ready = Boolean(url && settings.relayToken);
+  setupHint.hidden = ready;
+  connectButton.hidden = !ready;
+  connectButton.disabled = connecting;
+  relayAccess.hidden = !url;
+  if (url) {
+    const healthURL = new URL('/healthz', url);
+    healthURL.protocol = 'https:';
+    relayAccessLink.href = healthURL.href;
+  } else {
+    relayAccessLink.removeAttribute('href');
+  }
+}
 
-$('#relay-form').addEventListener('submit', (event) => {
+function savedAccount() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(accountKey));
+    if (saved?.username && saved?.password) return saved;
+  } catch { /* Storage can be disabled or hold bad data. */ }
+}
+
+function showAccount() {
+  accountNote.hidden = !account;
+  if (account) accountNote.textContent = `This browser's account: ${account.username}`;
+}
+
+// Saved like the desktop account file.
+function browserAccount() {
+  account ??= savedAccount();
+  if (!account) {
+    account = newAccount();
+    try {
+      localStorage.setItem(accountKey, JSON.stringify(account));
+    } catch { /* Without storage, the account lasts until this page closes. */ }
+  }
+  showAccount();
+  return account;
+}
+
+try {
+  for (const [name, key] of Object.entries(settingKeys)) settings[name] = localStorage.getItem(key) || '';
+} catch { /* Storage can be disabled. */ }
+relayURL.value = settings.relayURL;
+relayToken.value = settings.relayToken;
+loginUser.value = settings.username;
+loginPassword.value = settings.password;
+account = savedAccount();
+showAccount();
+updateSignin();
+
+relayForm.addEventListener('submit', (event) => {
   event.preventDefault();
   const relayStatus = $('#relay-status');
+  let url;
   try {
-    savedRelay = secureRelayURL(relayURL.value.trim()).href;
+    url = secureRelayURL(relayURL.value.trim()).href;
   } catch {
-    relayStatus.textContent = 'Enter a wss:// relay URL. You enter the relay token when you sign in.';
+    relayStatus.textContent = 'Enter a wss:// relay URL. Put the relay token in its own field.';
     return;
   }
-  relayURL.value = savedRelay;
-  updateRelayAccess();
+  const username = loginUser.value.trim();
+  if (!username !== !loginPassword.value) {
+    relayStatus.textContent = 'Enter both the Soulseek username and password, or leave both empty.';
+    return;
+  }
+  Object.assign(settings, { relayURL: url, relayToken: relayToken.value, username, password: loginPassword.value });
+  relayURL.value = url;
+  loginUser.value = username;
+  updateSignin();
   try {
-    localStorage.setItem(relayURLKey, savedRelay);
+    for (const [name, key] of Object.entries(settingKeys)) localStorage.setItem(key, settings[name]);
     relayStatus.textContent = 'Settings saved.';
   } catch {
     relayStatus.textContent = 'Settings could not be saved. They will work until this page closes.';
@@ -102,7 +164,7 @@ $('#relay-form').addEventListener('submit', (event) => {
 function showView() {
   const signedIn = Boolean(client);
   const picking = signedIn && step === 'search';
-  loginForm.hidden = signedIn;
+  signin.hidden = signedIn;
   session.hidden = !picking;
   pick.hidden = !picking;
   results.hidden = !signedIn || step !== 'files';
@@ -525,48 +587,24 @@ fullAlbumButton.addEventListener('click', () => {
   query.focus();
 });
 
-// Saved like the desktop account file. Accounts the user types in are never saved.
-function browserAccount() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(accountKey));
-    if (saved?.username && saved?.password) return saved;
-  } catch { /* Storage can be disabled or hold bad data. */ }
-  const account = newAccount();
-  try {
-    localStorage.setItem(accountKey, JSON.stringify(account));
-  } catch { /* Without storage, the account lasts until this page closes. */ }
-  return account;
-}
-
-loginForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  if (client) return;
-  let url;
-  try {
-    url = secureRelayURL(savedRelay);
-  } catch {
-    status.textContent = 'Add your relay URL in Settings first.';
-    return;
-  }
-  let username = $('#soulseek-user').value.trim();
-  let password = $('#soulseek-password').value;
+async function connect() {
+  const url = savedRelayURL();
+  if (client || connecting || !url || !settings.relayToken) return;
+  let { username, password } = settings;
   if (!username !== !password) {
-    status.textContent = 'Enter both your Soulseek username and password, or leave both empty to use this browser\'s account.';
+    status.textContent = 'Enter both the Soulseek username and password in Settings, or leave both empty.';
     return;
   }
   if (!username) ({ username, password } = browserAccount());
-  const relayToken = $('#relay-token').value;
-  $('#relay-token').value = '';
-  $('#soulseek-password').value = '';
-  const button = loginForm.querySelector('button');
-  button.disabled = true;
-  status.textContent = 'Signing in…';
+  connecting = true;
+  updateSignin();
+  status.textContent = 'Connecting…';
   try {
     const { connectClient } = await import('@project516/nicotine-plus-wasm');
-    const connected = await connectClient({ relayURL: url.href, relayToken, username, password });
+    const connected = await connectClient({ relayURL: url.href, relayToken: settings.relayToken, username, password });
     client = connected;
     const dropped = () => {
-      if (client === connected) signOut('Relay disconnected. Sign in to reconnect.');
+      if (client === connected) signOut('Relay disconnected. Connect to try again.');
     };
     connected.closed.then(dropped, dropped);
     showView();
@@ -577,9 +615,20 @@ loginForm.addEventListener('submit', async (event) => {
       ? `Soulseek rejected the sign-in: ${error.reason}`
       : 'Could not sign in. Check the relay URL, token, and allowed origin. If your relay uses Cloudflare Access, sign in to the relay first.';
   } finally {
-    button.disabled = false;
+    connecting = false;
+    updateSignin();
   }
-});
+}
+
+// Like the desktop Find music page, the first visit connects on its own.
+function openSoulseek() {
+  if (location.hash !== '#soulseek' || autoConnected || !savedRelayURL() || !settings.relayToken) return;
+  autoConnected = true;
+  connect();
+}
+
+connectButton.addEventListener('click', connect);
+addEventListener('hashchange', openSoulseek);
 
 searchForm.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -591,3 +640,4 @@ searchForm.addEventListener('submit', (event) => {
 
 $('#soulseek-disconnect').addEventListener('click', () => signOut('Disconnected.'));
 resetFind();
+openSoulseek();

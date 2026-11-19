@@ -89,12 +89,15 @@ The sidebar has three pages:
   for album folders and saves the whole folder as one `.zip`. Each song is
   fixed for the Sansa with the same rules as the desktop app before you save
   it. Soulseek needs your own secure WebSocket relay for
-  [nicotine-plus-wasm](https://github.com/Project516/nicotine-plus-wasm). If
-  the relay uses Cloudflare Access, use the sign-in link on the page first.
-  Leave the Soulseek username and password empty to use an account that the
-  page makes and keeps in this browser, as the desktop app does.
-- **Settings** holds the proxy URL and key and the relay URL. They stay in
-  browser storage. The relay token is entered at each sign-in and never saved.
+  [nicotine-plus-wasm](https://github.com/Project516/nicotine-plus-wasm). Set
+  it up in **Settings**. The page connects the first time you open it, and the
+  **Connect** button connects again after a disconnect. If the relay uses
+  Cloudflare Access, use the sign-in link on the page first.
+- **Settings** holds the proxy URL and key, and for Soulseek the relay URL,
+  relay token, and an optional Soulseek username and password. They stay in
+  browser storage. Leave the Soulseek username and password empty to use an
+  account that the page makes and keeps in this browser, as the desktop app
+  does. Settings shows that account's username once it exists.
 
 Copy saved songs, or the songs from an album `.zip`, into the Sansa's
 `Tracks/` folder.
