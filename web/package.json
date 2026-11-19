@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "vite build",
     "test": "node --test",
-    "test:browser": "node --test test-browser/soulseek.mjs"
+    "test:browser": "pnpm run build && node --test test-browser/soulseek.mjs"
   },
   "dependencies": {
     "@ffmpeg/core": "^0.12.10",
