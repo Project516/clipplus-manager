@@ -417,6 +417,11 @@ test('makes a Soulseek account when the login is left empty, reuses it, and show
   await connected();
   assert.deepEqual((await connections()).at(-1).username, username);
   assert.equal((await connections()).at(-1).password, password);
+
+  await saveSettings({ user: 'typed-user' });
+  assert.equal(await page.locator('#browser-account').isHidden(), true);
+  await saveSettings({ user: '', password: '' });
+  await page.getByText(`This browser's account: ${username}`, { exact: true }).waitFor();
 });
 
 test('sends a YouTube download without a proxy to Settings', { timeout: 60_000 }, async (t) => {

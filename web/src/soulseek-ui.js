@@ -105,8 +105,9 @@ function savedAccount() {
   } catch { /* Storage can be disabled or hold bad data. */ }
 }
 
+// Hidden while a typed login is saved. The account is kept, because Soulseek already registered its name.
 function showAccount() {
-  accountNote.hidden = !account;
+  accountNote.hidden = !account || Boolean(settings.username);
   if (account) accountNote.textContent = `This browser's account: ${account.username}`;
 }
 
@@ -153,6 +154,7 @@ relayForm.addEventListener('submit', (event) => {
   relayURL.value = url;
   loginUser.value = username;
   updateSignin();
+  showAccount();
   try {
     for (const [name, key] of Object.entries(settingKeys)) localStorage.setItem(key, settings[name]);
     relayStatus.textContent = 'Settings saved.';
