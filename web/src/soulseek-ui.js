@@ -4,6 +4,8 @@ const $ = (selector) => document.querySelector(selector);
 const loginForm = $('#soulseek-login');
 const session = $('#soulseek-session');
 const status = $('#soulseek-status');
+const submitButtons = document.querySelectorAll('#soulseek button[type="submit"]');
+let currentAction;
 let protocol;
 let relay;
 let lookupPeer;
@@ -16,18 +18,26 @@ function disconnect() {
   loginForm.hidden = false;
 }
 
+function finishAction() {
+  currentAction = undefined;
+  for (const button of submitButtons) button.disabled = false;
+}
+
 function submit(form, pending, action, failure) {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const buttons = document.querySelectorAll('#soulseek button');
-    for (const button of buttons) button.disabled = true;
+    if (currentAction || form.closest('[hidden]')) return;
+    const request = Symbol();
+    currentAction = request;
+    for (const button of submitButtons) button.disabled = true;
     status.textContent = pending;
     try {
-      status.textContent = await action();
+      const result = await action();
+      if (currentAction === request) status.textContent = result;
     } catch {
-      status.textContent = failure();
+      if (currentAction === request) status.textContent = failure();
     } finally {
-      for (const button of buttons) button.disabled = false;
+      if (currentAction === request) finishAction();
     }
   });
 }
@@ -56,6 +66,7 @@ submit(loginForm, 'Signing in…', async () => {
   lookupPeer = createPeerLookup(protocol, connection, () => {
     if (relay !== connection) return;
     disconnect();
+    finishAction();
     status.textContent = 'Relay disconnected. Sign in to reconnect.';
   });
   loginForm.hidden = true;
@@ -84,6 +95,7 @@ submit($('#soulseek-peer'), 'Looking up peer address…', async () => {
 
 $('#soulseek-disconnect').addEventListener('click', () => {
   disconnect();
+  finishAction();
   status.textContent = 'Disconnected.';
 });
 

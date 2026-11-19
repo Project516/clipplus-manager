@@ -70,6 +70,10 @@ test('signs in, sends a search, and shows a peer address through a relay fixture
   await page.getByRole('button', { name: 'Look up peer address' }).click();
   await page.getByText(`peer · ${[192, 0, 2, 1].join('.')}:5881`, { exact: true }).waitFor();
 
+  await page.getByLabel('Peer username').fill('missing');
+  await page.getByRole('button', { name: 'Look up peer address' }).click();
+  await page.getByText('Looking up peer address…', { exact: true }).waitFor();
   await page.getByRole('button', { name: 'Disconnect' }).click();
   await page.getByText('Disconnected.', { exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Sign in' }).waitFor();
 });
