@@ -1,9 +1,7 @@
 import './style.css';
 import { createYtDlp } from '@project516/yt-dlp-wasm';
-import { FFmpeg } from '@ffmpeg/ffmpeg';
-import coreURL from '../node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js?url';
-import wasmURL from '../node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.wasm?url';
-import { explain, offerSave, safeName, validateMp3 } from './output.js';
+import { FFmpeg, ffmpegCore } from './ffmpeg.js';
+import { explain, offerSave, releaseSave, safeName, validateMp3 } from './output.js';
 import { sponsorBlockAudioArgs, sponsorBlockLookup } from './sponsorblock.js';
 
 // The wheel name changes with each yt-dlp release.
@@ -62,7 +60,7 @@ $('#download-form').addEventListener('submit', async (event) => {
     return;
   }
   $('#submit').disabled = true;
-  save.hidden = true;
+  releaseSave(save);
   const removeSponsors = sponsorBlock.checked;
   let ytdlp;
   let ffmpeg;
@@ -88,7 +86,7 @@ $('#download-form').addEventListener('submit', async (event) => {
     ffmpeg.on('progress', ({ progress }) => {
       if (progress >= 0 && progress <= 1) screen('Converting', name, progress);
     });
-    await ffmpeg.load({ coreURL, wasmURL });
+    await ffmpeg.load(ffmpegCore);
     await ffmpeg.writeFile('input', files[0].data);
     const metadata = [];
     for (const [field, value] of Object.entries({ title: info.title, artist: info.artist || info.uploader, album: info.album || info.artist || info.uploader })) {

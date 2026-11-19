@@ -70,7 +70,9 @@ test('signs in, searches, downloads, and saves a song with a mock client', { tim
   await save.waitFor();
   const [saved] = await Promise.all([page.waitForEvent('download'), save.click()]);
   assert.equal(saved.suggestedFilename(), '01 Song.mp3');
-  assert.equal(await readFile(await saved.path(), 'utf8'), 'fixture:Music\\Album\\01 Song.mp3');
+  const song = await readFile(await saved.path());
+  assert.equal(song.toString('latin1', 0, 4), 'ID3\x03', 'ID3v2.3 tag');
+  assert.equal(song.includes('APIC'), false, 'cover art removed');
   assert.deepEqual(await page.evaluate(() => globalThis.nicotineMock.downloads.at(-1)), {
     user: 'queue-user',
     path: 'Music\\Album\\01 Song.mp3',
@@ -88,10 +90,16 @@ test('signs in, searches, downloads, and saves a song with a mock client', { tim
   await page.getByRole('button', { name: 'Cancel 03 Slow.flac' }).click();
   await page.getByText('Canceled', { exact: true }).waitFor();
   assert.equal(await downloadButton.isDisabled(), false);
+  await downloadButton.click();
+  await page.getByText('Queued, position 2', { exact: true }).waitFor();
 
   await page.evaluate(() => globalThis.nicotineMock.drop());
-  await page.getByText('Relay disconnected. Sign in to reconnect.', { exact: true }).waitFor();
+  await page.getByText('Canceled', { exact: true }).nth(1).waitFor();
+  assert.equal(await page.locator('#soulseek-status').textContent(), 'Relay disconnected. Sign in to reconnect.');
   await page.getByRole('button', { name: 'Sign in' }).waitFor();
+  await save.waitFor();
+  await page.getByRole('button', { name: 'Clear finished' }).click();
+  await page.getByRole('heading', { name: 'Downloads', level: 2 }).waitFor({ state: 'hidden' });
 
   await signIn('fixture-password');
   await page.getByRole('button', { name: 'Disconnect' }).click();

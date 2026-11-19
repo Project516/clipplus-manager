@@ -1,4 +1,6 @@
 // Stands in for @project516/nicotine-plus-wasm in the fixture build.
+import songURL from '../test-fixtures/art.mp3?url';
+
 const fixture = globalThis.nicotineMock = { connections: [], downloads: [], closedByApp: 0 };
 
 const song = (path, size, extra = {}) => {
@@ -49,8 +51,8 @@ export async function connectClient({ relayURL, relayToken, username, password }
       }
       onProgress?.({ state: 'queued', position: 2 });
       if (path.endsWith('Slow.flac')) await aborted(signal);
-      const bytes = new TextEncoder().encode(`fixture:${path}`);
-      onProgress?.({ state: 'transferring', received: bytes.length / 2, total: bytes.length });
+      const bytes = await (await fetch(songURL)).arrayBuffer();
+      onProgress?.({ state: 'transferring', received: bytes.byteLength / 2, total: bytes.byteLength });
       await tick();
       return new Blob([bytes]);
     },

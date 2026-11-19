@@ -4,8 +4,14 @@ export function safeName(name, extension = 'mp3') {
   return `${stem || '_'}.${extension}`;
 }
 
-export function offerSave(link, blob, name) {
+export function releaseSave(link) {
   if (link.href.startsWith('blob:')) URL.revokeObjectURL(link.href);
+  link.removeAttribute('href');
+  link.hidden = true;
+}
+
+export function offerSave(link, blob, name) {
+  releaseSave(link);
   link.href = URL.createObjectURL(blob);
   link.download = name;
   link.hidden = false;

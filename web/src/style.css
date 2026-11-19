@@ -76,7 +76,9 @@ button:disabled { opacity: .6; cursor: progress; }
 .connection { max-width: 480px; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; }
 .badge { padding: 1px 8px; border-radius: 3px; background: color-mix(in srgb, var(--positive) 16%, transparent); color: var(--positive); font-size: .9rem; }
 #soulseek-searching { max-width: 480px; }
-#soulseek-files h2 { margin: 20px 0 6px; font-size: 1rem; font-weight: 600; }
+#soulseek h2 { margin: 20px 0 6px; font-size: 1rem; font-weight: 600; }
+.section-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 20px 0 6px; }
+.section-header h2 { margin: 0; }
 .files { margin: 0; padding: 0; list-style: none; border: 1px solid var(--border); border-radius: 3px; }
 .choices { max-height: 26rem; overflow-y: auto; overscroll-behavior: contain; }
 .files > * { display: flex; align-items: center; gap: 12px; padding: 6px 10px; border-bottom: 1px solid var(--border); }

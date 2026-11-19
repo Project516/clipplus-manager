@@ -1,4 +1,6 @@
-import { offerSave, safeName } from './output.js';
+import { FFmpeg, ffmpegCore } from './ffmpeg.js';
+import { fixForSansa } from './fixer.js';
+import { offerSave, releaseSave, safeName } from './output.js';
 import { RESULT_LIMIT, addResult, describeProgress, fileDetails, fileKey, formatSize, secureRelayURL } from './soulseek.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -14,6 +16,8 @@ const session = $('#soulseek-session');
 const searching = $('#soulseek-searching');
 const files = $('#soulseek-files');
 const downloads = $('#soulseek-downloads');
+const downloadList = downloads.querySelector('ul');
+const clearButton = $('#soulseek-clear');
 const results = $('#soulseek-results');
 const choices = results.querySelector('.choices');
 const downloadButton = $('#soulseek-download');
@@ -25,6 +29,7 @@ let renderFrame;
 let selected;
 const choiceItems = new Map();
 const transfers = new Map();
+let fixing = Promise.resolve();
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -145,6 +150,36 @@ function setMeter(meter, fraction) {
   else meter.setAttribute('aria-valuenow', value);
 }
 
+function updateDownloads() {
+  const items = [...downloadList.children];
+  downloads.hidden = !items.length;
+  clearButton.disabled = items.every((item) => item.dataset.active);
+}
+
+// One at a time, so several finished downloads do not each start an FFmpeg worker.
+function fixQueued(blob, extension, signal, onProgress) {
+  const run = async () => {
+    signal.throwIfAborted();
+    onProgress(null);
+    const ffmpeg = new FFmpeg();
+    const stop = () => ffmpeg.terminate();
+    signal.addEventListener('abort', stop);
+    try {
+      ffmpeg.on('progress', ({ progress }) => {
+        if (progress >= 0 && progress <= 1) onProgress(progress);
+      });
+      await ffmpeg.load(ffmpegCore);
+      return await fixForSansa(ffmpeg, new Uint8Array(await blob.arrayBuffer()), extension);
+    } finally {
+      signal.removeEventListener('abort', stop);
+      ffmpeg.terminate();
+    }
+  };
+  const result = fixing.then(run, run);
+  fixing = result.catch(() => {});
+  return result;
+}
+
 async function download(file) {
   const key = fileKey(file);
   if (!client || transfers.has(key)) return;
@@ -153,6 +188,7 @@ async function download(file) {
   updateDownloadButton();
 
   const item = element('li');
+  item.dataset.active = 'true';
   const text = fileText(file, '', 'div');
   const detail = text.lastChild;
   const meter = element('div', 'meter');
@@ -168,8 +204,8 @@ async function download(file) {
   save.hidden = true;
   save.setAttribute('aria-label', `Save ${file.name}`);
   item.append(text, cancel, save);
-  downloads.querySelector('ul').prepend(item);
-  downloads.hidden = false;
+  downloadList.prepend(item);
+  updateDownloads();
   status.textContent = `Downloading ${file.name}.`;
 
   const show = ({ text: message, fraction }, stage = '') => {
@@ -178,6 +214,7 @@ async function download(file) {
     setMeter(meter, fraction);
   };
   show(describeProgress({ state: 'connecting' }));
+  let fixingStarted = false;
   try {
     const blob = await client.download(file.username, file.path, {
       size: file.size,
@@ -187,19 +224,41 @@ async function download(file) {
       },
     });
     controller.signal.throwIfAborted();
-    offerSave(save, blob, safeName(file.name, file.extension));
-    show({ text: `Ready to save · ${formatSize(blob.size)}` }, 'done');
-    status.textContent = `${file.name} is ready to save.`;
+    fixingStarted = true;
+    show({ text: 'Waiting to fix for the Sansa', fraction: null });
+    const fixed = await fixQueued(blob, file.extension, controller.signal, (fraction) => show({ text: 'Fixing for the Sansa', fraction }));
+    controller.signal.throwIfAborted();
+    const name = safeName(file.name, fixed.ext);
+    offerSave(save, new Blob([fixed.bytes], { type: fixed.ext === 'mp3' ? 'audio/mpeg' : 'audio/flac' }), name);
+    show({ text: `Ready to save · ${formatSize(fixed.bytes.length)}` }, 'done');
+    status.textContent = `${name} is ready to save.`;
   } catch (error) {
-    const message = controller.signal.aborted ? 'Canceled' : `Download failed: ${error?.reason || 'the user could not send the file.'}`;
-    show({ text: message }, controller.signal.aborted ? '' : 'failed');
-    status.textContent = `${file.name}: ${message}`;
+    if (controller.signal.aborted) {
+      show({ text: 'Canceled' });
+    } else {
+      const message = fixingStarted
+        ? `Could not fix for the Sansa: ${error?.message ?? error}`
+        : `Download failed: ${error?.reason || 'the user could not send the file.'}`;
+      show({ text: message }, 'failed');
+      status.textContent = `${file.name}: ${message}`;
+    }
   } finally {
     cancel.remove();
+    delete item.dataset.active;
     if (transfers.get(key) === controller) transfers.delete(key);
     updateDownloadButton();
+    updateDownloads();
   }
 }
+
+clearButton.addEventListener('click', () => {
+  for (const item of [...downloadList.children]) {
+    if (item.dataset.active) continue;
+    releaseSave(item.querySelector('.save'));
+    item.remove();
+  }
+  updateDownloads();
+});
 
 loginForm.addEventListener('submit', async (event) => {
   event.preventDefault();
