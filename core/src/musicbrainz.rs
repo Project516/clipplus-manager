@@ -359,7 +359,7 @@ mod tests {
         let order = |query: &str, recordings: Vec<Value>| -> Vec<String> {
             let results: Results =
                 serde_json::from_value(json!({"recordings": recordings})).unwrap();
-            rank(results.recordings, query)
+            rank(results.recordings.unwrap(), query)
                 .into_iter()
                 .map(|r| r.id)
                 .collect()
