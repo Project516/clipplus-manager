@@ -53,8 +53,10 @@ test('the production build signs in and sends a search through a relay fixture',
     });
   });
 
-  await page.goto(`${origin}/#soulseek`);
-  await page.getByLabel('Private relay URL').fill(relayURL);
+  await page.goto(`${origin}/#settings`);
+  await page.getByLabel('Relay URL').fill(relayURL);
+  await page.locator('#relay-form').getByRole('button', { name: 'Save settings' }).click();
+  await page.getByRole('navigation').getByRole('link', { name: 'Soulseek' }).click();
   await page.getByLabel('Relay token').fill('fixture-token');
   await page.getByLabel('Soulseek username').fill('fixture-user');
   await page.getByLabel('Soulseek password').fill('fixture-password');
@@ -64,11 +66,13 @@ test('the production build signs in and sends a search through a relay fixture',
   assert.equal(sent[1].readUInt32LE(4), 1);
   assert.equal(sent[1].toString('utf8', 12, 24), 'fixture-user');
 
-  await page.getByLabel('Search Soulseek').fill('fixture query');
-  await page.getByRole('button', { name: 'Search' }).click();
+  await page.getByLabel('Search for').selectOption('Album');
+  await page.getByLabel('Artist and album').fill('fixture query');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
   const search = await searched.promise;
   assert.equal(search.toString('utf8', 16), 'fixture query');
 
+  await page.getByRole('button', { name: 'Back' }).click();
   await page.getByRole('button', { name: 'Disconnect' }).click();
   await page.getByText('Disconnected.', { exact: true }).waitFor();
 });

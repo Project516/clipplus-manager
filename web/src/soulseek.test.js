@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { addResult, describeProgress, fileDetails, formatDuration, formatSize, secureRelayURL } from './soulseek.js';
+import { addResult, albumDetails, baseName, describeProgress, fileDetails, formatDuration, formatSize, groupAlbumFiles, newAccount, parentFolder, plural, secureRelayURL } from './soulseek.js';
+
+test('makes an account shaped like the desktop one', () => {
+  const account = newAccount();
+  assert.match(account.username, /^clipplus[0-9a-f]{10}$/);
+  assert.match(account.password, /^[0-9a-f]{48}$/);
+  assert.notEqual(newAccount().username, account.username);
+  assert.deepEqual(newAccount((length) => new Uint8Array(length).fill(171)), { username: 'clipplusababababab', password: 'ab'.repeat(24) });
+});
 
 test('accepts only secure relay URLs without embedded credentials', () => {
   assert.equal(secureRelayURL('wss://relay.invalid/socket').pathname, '/socket');
@@ -32,6 +40,42 @@ test('caps the list at the best results', () => {
   let rows = addResult([], peer('slow', false, 1, many), 3);
   rows = addResult(rows, peer('quick', true, 1, [file('x.mp3')]), 3);
   assert.deepEqual(rows.map((row) => row.name), ['x.mp3', '0.flac', '1.flac']);
+});
+
+const found = (username, ...paths) => ({ username, files: paths.map((path) => ({ path, name: path.split(/[\\/]/).pop(), size: 1 })) });
+
+test('groups audio files into album folders per user', () => {
+  const groups = groupAlbumFiles(new Map(), found('peer',
+    'Artist\\Album\\01.flac', 'Artist\\Album\\02.MP3', 'Artist\\Album\\cover.jpg', 'Artist\\Album\\notes.txt', 'loose.mp3', '\\root.mp3'));
+  groupAlbumFiles(groups, found('other', 'Artist\\Album\\01.flac'));
+  groupAlbumFiles(groups, found('peer', 'Artist/Other/a.ogg', 'Artist/Other/b.wav', 'Artist\\Album\\03.mp3'));
+  assert.deepEqual([...groups.values()].map(({ username, folder, name, songs, format }) => ({ username, folder, name, songs, format })), [
+    { username: 'peer', folder: 'Artist\\Album', name: 'Album', songs: 3, format: 'mp3' },
+    { username: 'other', folder: 'Artist\\Album', name: 'Album', songs: 1, format: 'flac' },
+    { username: 'peer', folder: 'Artist/Other', name: 'Other', songs: 2, format: 'ogg' },
+  ]);
+});
+
+test('names the most common format and counts a repeated file once', () => {
+  const groups = groupAlbumFiles(new Map(), found('peer', 'A\\B\\1.flac', 'A\\B\\2.mp3', 'A\\B\\3.mp3', 'A\\B\\3.mp3'));
+  assert.deepEqual([...groups.values()].map(albumDetails), ['peer · 3 songs · mp3']);
+  assert.equal(albumDetails({ username: 'peer', songs: 1, format: 'ogg' }), 'peer · 1 song · ogg');
+});
+
+test('caps album folders but still counts songs in the ones kept', () => {
+  const groups = groupAlbumFiles(new Map(), found('peer', 'A\\1\\a.mp3', 'A\\2\\a.mp3', 'A\\3\\a.mp3', 'A\\1\\b.mp3'), 2);
+  assert.deepEqual([...groups.values()].map((group) => [group.folder, group.songs]), [['A\\1', 2], ['A\\2', 1]]);
+});
+
+test('splits a path into folder and name', () => {
+  assert.equal(parentFolder('Music\\Album\\01 Song.mp3'), 'Music\\Album');
+  assert.equal(parentFolder('Music/Album/01 Song.mp3'), 'Music/Album');
+  assert.equal(parentFolder('Song.mp3'), undefined);
+  assert.equal(parentFolder('\\Song.mp3'), undefined);
+  assert.equal(baseName('Music\\Album'), 'Album');
+  assert.equal(baseName('Album'), 'Album');
+  assert.equal(plural(1, 'song'), '1 song');
+  assert.equal(plural(0, 'song'), '0 songs');
 });
 
 test('describes files and progress for the panel', () => {

@@ -85,16 +85,24 @@ async function probe(ffmpeg, file) {
   }
 }
 
+// Tags to write, like fix_with_metadata: the given title and artist win, and a blank album falls back to the artist.
+export function tagArgs(info, metadata) {
+  const tags = metadata ? [['title', metadata.title], ['artist', metadata.artist]] : [];
+  if (metadata?.album) tags.push(['album', metadata.album]);
+  const artist = (metadata?.artist ?? info.tags.artist)?.trim();
+  if (!metadata?.album && !info.tags.album?.trim() && artist) tags.push(['album', artist]);
+  return tags.flatMap(([key, value]) => ['-metadata', `${key}=${value}`]);
+}
+
 // ffmpeg is an @ffmpeg/ffmpeg instance, or anything with the same four methods.
-export async function fixForSansa(ffmpeg, bytes, extension) {
+// metadata is optional: { title, artist, album }.
+export async function fixForSansa(ffmpeg, bytes, extension, metadata) {
   const input = `input.${extension}`;
   await ffmpeg.writeFile(input, bytes);
   const info = await probe(ffmpeg, input);
   const { ext, args } = plan(info, id3Size(bytes));
-  const artist = info.tags.artist?.trim();
-  const album = !info.tags.album?.trim() && artist ? ['-metadata', `album=${artist}`] : [];
   const output = `output.${ext}`;
-  if (await ffmpeg.exec(['-i', input, ...args, ...album, '-f', ext, output]) !== 0) {
+  if (await ffmpeg.exec(['-i', input, ...args, ...tagArgs(info, metadata), '-f', ext, output]) !== 0) {
     throw new Error('The song could not be fixed for the Sansa.');
   }
   const fixed = await ffmpeg.readFile(output);

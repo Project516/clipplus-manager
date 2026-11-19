@@ -1,46 +1,70 @@
+import { createJobs, element } from './dom.js';
 import { FFmpeg, ffmpegCore } from './ffmpeg.js';
 import { fixForSansa } from './fixer.js';
-import { offerSave, releaseSave, safeName } from './output.js';
-import { RESULT_LIMIT, addResult, describeProgress, fileDetails, fileKey, formatSize, secureRelayURL } from './soulseek.js';
+import { recordingDetails, searchRecordings } from './musicbrainz.js';
+import { safeName } from './output.js';
+import {
+  PLAYABLE, RESULT_LIMIT, addResult, albumDetails, albumKey, baseName, describeProgress, fileDetails, fileKey,
+  formatSize, groupAlbumFiles, newAccount, parentFolder, plural, secureRelayURL,
+} from './soulseek.js';
+import { uniqueName, zipStored } from './zip.js';
 
 const $ = (selector) => document.querySelector(selector);
 const loginForm = $('#soulseek-login');
 const searchForm = $('#soulseek-search');
+const mode = $('#soulseek-mode');
 const query = $('#soulseek-query');
+const queryLabel = $('#soulseek-query-label');
+const searchButton = searchForm.querySelector('button');
 const relayURL = $('#relay-url');
 const relayAccess = $('#relay-access');
 const relayAccessLink = $('#relay-access-link');
 const relayURLKey = 'soulseekRelayURL';
+const accountKey = 'soulseekAccount';
 const status = $('#soulseek-status');
 const session = $('#soulseek-session');
-const searching = $('#soulseek-searching');
-const files = $('#soulseek-files');
-const downloads = $('#soulseek-downloads');
-const downloadList = downloads.querySelector('ul');
-const clearButton = $('#soulseek-clear');
+const lookupMeter = $('#soulseek-searching');
+const peerMeter = $('#soulseek-peer-searching');
+const pick = $('#soulseek-pick');
+const songsSection = $('#soulseek-songs');
+const songChoices = songsSection.querySelector('.choices');
+const findButton = $('#soulseek-find');
+const empty = $('#soulseek-empty');
 const results = $('#soulseek-results');
+const resultsHeading = $('#soulseek-results-heading');
+const track = $('#soulseek-track');
 const choices = results.querySelector('.choices');
+const backButton = $('#soulseek-back');
 const downloadButton = $('#soulseek-download');
+const fullAlbumButton = $('#soulseek-full-album');
+const addJob = createJobs($('#soulseek-downloads'), $('#soulseek-clear'));
+
+const hints = {
+  song: ['Search MusicBrainz for a song', 'Then pick a file from Soulseek. It is fixed for your Sansa before you save it.'],
+  album: ['Search Soulseek for an album', 'Choose a folder. Its songs are fixed for your Sansa and saved as one .zip.'],
+};
 
 let client;
+let savedRelay = '';
 let search;
+let step = 'search';
+let songs = [];
+let selectedSong;
+let fileSong;
 let rows = [];
-let renderFrame;
 let selected;
+let renderFrame;
 const choiceItems = new Map();
 const transfers = new Map();
 let fixing = Promise.resolve();
 
-function element(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text) node.textContent = text;
-  return node;
-}
+const isFolder = (row) => 'folder' in row;
+const rowKey = (row) => (isFolder(row) ? albumKey(row.username, row.folder) : fileKey(row));
+const rowDetails = (row) => (isFolder(row) ? albumDetails(row) : fileDetails(row));
 
 function updateRelayAccess() {
   try {
-    const healthURL = new URL('/healthz', secureRelayURL(relayURL.value));
+    const healthURL = new URL('/healthz', secureRelayURL(savedRelay));
     healthURL.protocol = 'https:';
     relayAccessLink.href = healthURL.href;
     relayAccess.hidden = false;
@@ -51,38 +75,107 @@ function updateRelayAccess() {
 }
 
 try {
-  relayURL.value = localStorage.getItem(relayURLKey) || '';
+  savedRelay = localStorage.getItem(relayURLKey) || '';
 } catch { /* Storage can be disabled. */ }
+relayURL.value = savedRelay;
 updateRelayAccess();
-relayURL.addEventListener('input', updateRelayAccess);
-relayURL.addEventListener('change', () => {
+
+$('#relay-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const relayStatus = $('#relay-status');
   try {
-    if (relayURL.value) {
-      localStorage.setItem(relayURLKey, secureRelayURL(relayURL.value).href);
-    } else {
-      localStorage.removeItem(relayURLKey);
-    }
-  } catch { /* Invalid URLs and disabled storage cannot be saved. */ }
+    savedRelay = secureRelayURL(relayURL.value.trim()).href;
+  } catch {
+    relayStatus.textContent = 'Enter a wss:// relay URL. You enter the relay token when you sign in.';
+    return;
+  }
+  relayURL.value = savedRelay;
+  updateRelayAccess();
+  try {
+    localStorage.setItem(relayURLKey, savedRelay);
+    relayStatus.textContent = 'Settings saved.';
+  } catch {
+    relayStatus.textContent = 'Settings could not be saved. They will work until this page closes.';
+  }
 });
 
-function showSession(signedIn) {
+function showView() {
+  const signedIn = Boolean(client);
+  const picking = signedIn && step === 'search';
   loginForm.hidden = signedIn;
-  session.hidden = !signedIn;
-  files.hidden = !signedIn;
+  session.hidden = !picking;
+  pick.hidden = !picking;
+  results.hidden = !signedIn || step !== 'files';
+}
+
+function endSearch() {
+  search = undefined;
+  lookupMeter.hidden = true;
+  peerMeter.hidden = true;
+  searchButton.disabled = false;
+}
+
+function stopSearch() {
+  search?.abort();
+  endSearch();
+}
+
+function startSearch() {
+  stopSearch();
+  search = new AbortController();
+  return search;
+}
+
+function showStep(next, heading, trackText = '') {
+  step = next;
+  stopSearch();
+  rows = [];
+  selected = undefined;
+  renderResults();
+  if (next === 'files') {
+    const album = mode.value === 'album';
+    resultsHeading.textContent = heading;
+    track.textContent = trackText;
+    fullAlbumButton.hidden = album;
+    downloadButton.textContent = album ? 'Download album' : 'Download';
+  }
+  showView();
+}
+
+function showEmpty(title, text = '') {
+  empty.hidden = false;
+  empty.firstChild.textContent = title;
+  empty.lastChild.textContent = text;
+}
+
+function renderSongs() {
+  selectedSong = undefined;
+  findButton.disabled = true;
+  songChoices.replaceChildren(...songs.map(songItem));
+  songsSection.hidden = !songs.length;
+  empty.hidden = songs.length > 0;
+}
+
+// Back to a blank Find music page for the current mode.
+function resetFind() {
+  stopSearch();
+  songs = [];
+  renderSongs();
+  const album = mode.value === 'album';
+  queryLabel.textContent = album ? 'Artist and album' : 'Artist and song';
+  query.placeholder = queryLabel.textContent;
+  showEmpty(...hints[mode.value]);
+  status.textContent = '';
 }
 
 function signOut(message) {
   const closing = client;
   client = undefined;
-  search?.abort();
-  search = undefined;
-  searching.hidden = true;
   for (const controller of transfers.values()) controller.abort();
   transfers.clear();
   closing?.close();
-  rows = [];
-  renderResults();
-  showSession(false);
+  resetFind();
+  showStep('search');
   status.textContent = message;
 }
 
@@ -90,76 +183,84 @@ function scheduleRender() {
   renderFrame ??= requestAnimationFrame(renderResults);
 }
 
-function updateDownloadButton() {
-  downloadButton.disabled = !client || !selected || transfers.has(fileKey(selected));
+function updateButtons() {
+  const ready = Boolean(client && selected);
+  downloadButton.disabled = !ready || transfers.has(rowKey(selected));
+  const folder = selected && !isFolder(selected) && parentFolder(selected.path);
+  fullAlbumButton.disabled = !ready || !folder || transfers.has(albumKey(selected.username, folder));
+}
+
+function choiceText(name, path, details) {
+  const text = element('span', 'file');
+  const label = element('span', 'file-name', name);
+  if (path) label.title = path;
+  text.append(label, element('span', 'file-details', details));
+  return text;
+}
+
+function radioItem(group, onPick, text) {
+  const item = element('label');
+  const input = element('input');
+  input.type = 'radio';
+  input.name = group;
+  input.addEventListener('change', onPick);
+  item.append(input, text);
+  return item;
+}
+
+function songItem(song) {
+  const item = radioItem('soulseek-song', () => {
+    selectedSong = song;
+    findButton.disabled = !client;
+  }, choiceText(song.title, '', recordingDetails(song)));
+  item.addEventListener('dblclick', () => findFiles(song));
+  return item;
+}
+
+function rowItem(row) {
+  const item = radioItem('soulseek-file', () => {
+    selected = row;
+    updateButtons();
+  }, choiceText(row.name, row.folder ?? row.path, rowDetails(row)));
+  item.addEventListener('dblclick', () => startDownload(row));
+  return item;
 }
 
 // Moves only the rows whose place changed, so the focused row keeps focus.
 function renderResults() {
   cancelAnimationFrame(renderFrame);
   renderFrame = undefined;
-  const keys = new Set(rows.map(fileKey));
+  const keys = new Set(rows.map(rowKey));
   for (const [key, item] of choiceItems) {
     if (!keys.has(key)) {
       item.remove();
       choiceItems.delete(key);
     }
   }
-  if (selected && !keys.has(fileKey(selected))) selected = undefined;
-  rows.forEach((file, index) => {
-    const key = fileKey(file);
+  if (selected && !keys.has(rowKey(selected))) selected = undefined;
+  rows.forEach((row, index) => {
+    const key = rowKey(row);
     let item = choiceItems.get(key);
     if (!item) {
-      item = choiceItem(file);
+      item = rowItem(row);
       choiceItems.set(key, item);
     }
+    const details = item.querySelector('.file-details');
+    if (details.textContent !== rowDetails(row)) details.textContent = rowDetails(row);
     if (choices.children[index] !== item) choices.insertBefore(item, choices.children[index] ?? null);
   });
-  results.hidden = !rows.length;
-  updateDownloadButton();
-}
-
-function fileText(file, details, tag = 'span') {
-  const text = element(tag, 'file');
-  const name = element('span', 'file-name', file.name);
-  name.title = file.path;
-  text.append(name, element('span', 'file-details', details));
-  return text;
-}
-
-function choiceItem(file) {
-  const item = element('label');
-  const input = element('input');
-  input.type = 'radio';
-  input.name = 'soulseek-file';
-  input.addEventListener('change', () => {
-    selected = file;
-    updateDownloadButton();
-  });
-  item.append(input, fileText(file, fileDetails(file)));
-  item.addEventListener('dblclick', () => download(file));
-  return item;
-}
-
-function setMeter(meter, fraction) {
-  meter.hidden = fraction === undefined;
-  meter.classList.toggle('busy', fraction === null);
-  const value = Math.round((fraction ?? 0) * 100);
-  meter.firstChild.style.width = fraction === null ? '' : `${value}%`;
-  if (fraction == null) meter.removeAttribute('aria-valuenow');
-  else meter.setAttribute('aria-valuenow', value);
-}
-
-function updateDownloads() {
-  const items = [...downloadList.children];
-  downloads.hidden = !items.length;
-  clearButton.disabled = items.every((item) => item.dataset.active);
+  updateButtons();
 }
 
 // One at a time, so several finished downloads do not each start an FFmpeg worker.
-function fixQueued(blob, extension, signal, onProgress) {
+function fixQueued(blob, extension, signal, onProgress, metadata) {
+  let source = blob;
+  // A canceled job must not keep its audio while it waits behind another fix.
+  signal.addEventListener('abort', () => { source = undefined; }, { once: true });
   const run = async () => {
     signal.throwIfAborted();
+    const bytes = new Uint8Array(await source.arrayBuffer());
+    source = undefined;
     onProgress(null);
     const ffmpeg = new FFmpeg();
     const stop = () => ffmpeg.terminate();
@@ -169,7 +270,7 @@ function fixQueued(blob, extension, signal, onProgress) {
         if (progress >= 0 && progress <= 1) onProgress(progress);
       });
       await ffmpeg.load(ffmpegCore);
-      return await fixForSansa(ffmpeg, new Uint8Array(await blob.arrayBuffer()), extension);
+      return await fixForSansa(ffmpeg, bytes, extension, metadata);
     } finally {
       signal.removeEventListener('abort', stop);
       ffmpeg.terminate();
@@ -182,99 +283,279 @@ function fixQueued(blob, extension, signal, onProgress) {
   return Promise.race([result, aborted]);
 }
 
-async function download(file) {
-  const key = fileKey(file);
-  if (!client || transfers.has(key)) return;
-  const controller = new AbortController();
-  transfers.set(key, controller);
-  updateDownloadButton();
-
-  const item = element('li');
-  item.dataset.active = 'true';
-  const text = fileText(file, '', 'div');
-  const detail = text.lastChild;
-  const meter = element('div', 'meter');
-  meter.setAttribute('role', 'progressbar');
-  meter.setAttribute('aria-label', `${file.name} progress`);
-  meter.append(element('span'));
-  text.append(meter);
-  const cancel = element('button', '', 'Cancel');
-  cancel.type = 'button';
-  cancel.setAttribute('aria-label', `Cancel ${file.name}`);
-  cancel.addEventListener('click', () => controller.abort());
-  const save = element('a', 'save', 'Save');
-  save.hidden = true;
-  save.setAttribute('aria-label', `Save ${file.name}`);
-  item.append(text, cancel, save);
-  downloadList.prepend(item);
-  updateDownloads();
-  status.textContent = `Downloading ${file.name}.`;
-
-  const show = ({ text: message, fraction }, stage = '') => {
-    detail.textContent = message;
-    detail.className = `file-details ${stage}`.trim();
-    setMeter(meter, fraction);
-  };
-  show(describeProgress({ state: 'connecting' }));
-  let fixingStarted = false;
+// Downloads one song and fixes it for the Sansa. Failures carry the sentence to show.
+// report gets the progress and the phase, 'download' or 'fix'.
+async function fetchFixed(connection, username, file, signal, report, metadata) {
+  report(describeProgress({ state: 'connecting' }), 'download');
+  let blob;
   try {
-    const blob = await client.download(file.username, file.path, {
+    blob = await connection.download(username, file.path, {
       size: file.size,
-      signal: controller.signal,
+      signal,
       onProgress: (progress) => {
-        if (!controller.signal.aborted) show(describeProgress(progress));
+        if (!signal.aborted) report(describeProgress(progress), 'download');
       },
     });
-    controller.signal.throwIfAborted();
-    fixingStarted = true;
-    show({ text: 'Waiting to fix for the Sansa', fraction: null });
-    const fixed = await fixQueued(blob, file.extension, controller.signal, (fraction) => show({ text: 'Fixing for the Sansa', fraction }));
-    controller.signal.throwIfAborted();
-    const name = safeName(file.name, fixed.ext);
-    offerSave(save, new Blob([fixed.bytes], { type: fixed.ext === 'mp3' ? 'audio/mpeg' : 'audio/flac' }), name);
-    show({ text: `Ready to save · ${formatSize(fixed.bytes.length)}` }, 'done');
-    status.textContent = `${name} is ready to save.`;
   } catch (error) {
-    if (controller.signal.aborted) {
-      show({ text: 'Canceled' });
-    } else {
-      const message = fixingStarted
-        ? `Could not fix for the Sansa: ${error?.message ?? error}`
-        : `Download failed: ${error?.reason || 'the user could not send the file.'}`;
-      show({ text: message }, 'failed');
-      status.textContent = `${file.name}: ${message}`;
-    }
-  } finally {
-    cancel.remove();
-    delete item.dataset.active;
-    if (transfers.get(key) === controller) transfers.delete(key);
-    updateDownloadButton();
-    updateDownloads();
+    throw signal.aborted ? error : new Error(`Download failed: ${error?.reason || 'the user could not send the file.'}`);
+  }
+  signal.throwIfAborted();
+  report({ text: 'Waiting to fix for the Sansa', fraction: null }, 'fix');
+  try {
+    return await fixQueued(blob, file.extension, signal, (fraction) => report({ text: 'Fixing for the Sansa', fraction }, 'fix'), metadata);
+  } catch (error) {
+    throw signal.aborted ? error : new Error(`Could not fix for the Sansa: ${error?.message ?? error}`);
   }
 }
 
-clearButton.addEventListener('click', () => {
-  for (const item of [...downloadList.children]) {
-    if (item.dataset.active) continue;
-    releaseSave(item.querySelector('.save'));
-    item.remove();
+async function download(file, metadata) {
+  const key = fileKey(file);
+  const controller = new AbortController();
+  const { signal } = controller;
+  transfers.set(key, controller);
+  const job = addJob({ name: file.name, path: file.path, onCancel: () => controller.abort() });
+  status.textContent = `Downloading ${file.name}.`;
+  try {
+    const fixed = await fetchFixed(client, file.username, file, signal, (progress) => job.show(progress), metadata);
+    signal.throwIfAborted();
+    const name = safeName(file.name, fixed.ext);
+    job.offer(new Blob([fixed.bytes], { type: fixed.ext === 'mp3' ? 'audio/mpeg' : 'audio/flac' }), name);
+    job.show({ text: `Ready to save · ${formatSize(fixed.bytes.length)}` }, 'done');
+    status.textContent = `${name} is ready to save.`;
+  } catch (error) {
+    if (signal.aborted) {
+      job.show({ text: 'Canceled' });
+      // After sign-out the status already says why everything stopped.
+      if (client) status.textContent = `Canceled ${file.name}.`;
+    } else {
+      job.show({ text: error.message }, 'failed');
+      status.textContent = `${file.name}: ${error.message}`;
+    }
+  } finally {
+    job.finish();
+    if (transfers.get(key) === controller) transfers.delete(key);
+    updateButtons();
   }
-  updateDownloads();
+}
+
+// An album is one row: songs download and fix one by one, then they are zipped.
+async function downloadAlbum(username, folder) {
+  const key = albumKey(username, folder);
+  const title = baseName(folder);
+  const connection = client;
+  const controller = new AbortController();
+  const { signal } = controller;
+  transfers.set(key, controller);
+  const job = addJob({ name: title, path: folder, onCancel: () => controller.abort() });
+  const list = element('ul', 'tracks');
+  job.meter.before(list);
+  status.textContent = `Downloading ${title}.`;
+  const ready = [];
+  const lines = [];
+  let songFiles = [];
+  let total = 0;
+  let failed = 0;
+  try {
+    job.show({ text: 'Listing the folder', fraction: null });
+    const listed = await connection.browseFolder(username, folder, { signal }).catch((error) => {
+      throw signal.aborted ? error : new Error(`Could not list the folder: ${error?.reason || 'the user did not answer.'}`);
+    });
+    songFiles = listed.filter((file) => PLAYABLE.includes(file.extension));
+    if (!songFiles.length) throw new Error('No playable songs in this folder.');
+    total = songFiles.length;
+    for (const file of songFiles) {
+      lines.push(list.appendChild(element('li', '', `${file.name} · waiting`)));
+    }
+    for (const [index, file] of songFiles.entries()) {
+      signal.throwIfAborted();
+      const report = ({ text: message, fraction }, phase) => {
+        lines[index].textContent = `${file.name} · ${message}`;
+        const song = phase === 'fix' ? 1 : fraction ?? 0;
+        job.show({ text: `${ready.length} of ${total} songs ready`, fraction: (index + song) / total });
+      };
+      try {
+        const fixed = await fetchFixed(connection, username, file, signal, report);
+        ready.push({ name: safeName(file.name, fixed.ext), bytes: fixed.bytes });
+        lines[index].textContent = `${file.name} · ready`;
+        lines[index].className = 'ready';
+      } catch (error) {
+        if (signal.aborted) throw error;
+        failed += 1;
+        lines[index].textContent = `${file.name} · ${error.message}`;
+        lines[index].className = 'failed';
+      }
+    }
+    if (!ready.length) throw new Error('Download failed: no songs could be downloaded.');
+    const taken = new Set();
+    const zipName = safeName(`${title}.zip`, 'zip');
+    job.offer(zipStored(ready.map(({ name, bytes }) => ({ name: uniqueName(name, taken), bytes }))), zipName, 'Save .zip');
+    const size = ready.reduce((sum, song) => sum + song.bytes.length, 0);
+    job.show({ text: `Ready to save · ${plural(ready.length, 'song')} · ${formatSize(size)}${failed ? ` · ${failed} failed` : ''}` }, failed ? 'failed' : 'done');
+    list.hidden = !failed;
+    status.textContent = `${zipName} is ready to save.`;
+  } catch (error) {
+    if (signal.aborted) {
+      lines.forEach((line, index) => {
+        if (!line.className) line.textContent = `${songFiles[index].name} · canceled`;
+      });
+      job.show({ text: total ? `Canceled · ${ready.length} of ${total} songs were ready` : 'Canceled' });
+      if (client) status.textContent = `Canceled ${title}.`;
+    } else {
+      job.show({ text: error.message }, 'failed');
+      status.textContent = `${title}: ${error.message}`;
+    }
+  } finally {
+    job.finish();
+    if (transfers.get(key) === controller) transfers.delete(key);
+    updateButtons();
+  }
+}
+
+function startDownload(row) {
+  if (!client || transfers.has(rowKey(row))) return;
+  if (isFolder(row)) {
+    downloadAlbum(row.username, row.folder);
+  } else {
+    const song = fileSong && { title: fileSong.title, artist: fileSong.artist, album: fileSong.release };
+    download(row, song);
+  }
+  showStep('search');
+  query.focus();
+}
+
+async function searchSoulseek({ text, heading, trackText, add, summary }) {
+  showStep('files', heading, trackText);
+  const controller = startSearch();
+  peerMeter.hidden = false;
+  status.textContent = `Searching for ${text}…`;
+  try {
+    await client.search(text, {
+      signal: controller.signal,
+      onResult: (result) => {
+        if (search !== controller) return;
+        add(result);
+        scheduleRender();
+      },
+    });
+  } catch {
+    if (search === controller) status.textContent = 'The search stopped early. Try again.';
+    return;
+  } finally {
+    if (search === controller) endSearch();
+  }
+  if (controller.signal.aborted) return;
+  renderResults();
+  status.textContent = summary();
+}
+
+function findFiles(song) {
+  if (!client) return;
+  fileSong = song;
+  return searchSoulseek({
+    text: `${song.artist} ${song.title}`,
+    heading: 'Choose a file',
+    trackText: `${song.artist} · ${song.title}`,
+    add: (result) => { rows = addResult(rows, result); },
+    summary: () => {
+      if (!rows.length) return 'No playable songs found. Try other words.';
+      if (rows.length === RESULT_LIMIT) return `Showing the best ${RESULT_LIMIT} files.`;
+      return `Found ${plural(rows.length, 'file')}.`;
+    },
+  });
+}
+
+function findAlbums(text) {
+  const groups = new Map();
+  fileSong = undefined;
+  return searchSoulseek({
+    text,
+    heading: 'Choose an album folder',
+    trackText: text,
+    add: (result) => { rows = [...groupAlbumFiles(groups, result).values()]; },
+    summary: () => {
+      if (!rows.length) return 'No album folders found. Try other words.';
+      if (rows.length === RESULT_LIMIT) return `Showing the first ${RESULT_LIMIT} album folders.`;
+      return `Found ${plural(rows.length, 'album folder')}.`;
+    },
+  });
+}
+
+async function findSongs(text) {
+  const controller = startSearch();
+  songs = [];
+  renderSongs();
+  empty.hidden = true;
+  lookupMeter.hidden = false;
+  searchButton.disabled = true;
+  status.textContent = 'Searching MusicBrainz…';
+  try {
+    songs = await searchRecordings(text, { signal: controller.signal });
+  } catch (error) {
+    if (search === controller) status.textContent = error.message;
+    return;
+  } finally {
+    if (search === controller) endSearch();
+  }
+  if (controller.signal.aborted) return;
+  renderSongs();
+  if (songs.length) {
+    status.textContent = `Found ${plural(songs.length, 'recording')}.`;
+  } else {
+    showEmpty('No recordings found');
+    status.textContent = '';
+  }
+}
+
+backButton.addEventListener('click', () => {
+  showStep('search');
+  query.focus();
 });
+mode.addEventListener('change', resetFind);
+findButton.addEventListener('click', () => {
+  if (selectedSong) findFiles(selectedSong);
+});
+downloadButton.addEventListener('click', () => {
+  if (selected) startDownload(selected);
+});
+fullAlbumButton.addEventListener('click', () => {
+  const folder = selected && !isFolder(selected) && parentFolder(selected.path);
+  if (!folder || !client || transfers.has(albumKey(selected.username, folder))) return;
+  downloadAlbum(selected.username, folder);
+  showStep('search');
+  query.focus();
+});
+
+// Saved like the desktop account file. Accounts the user types in are never saved.
+function browserAccount() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(accountKey));
+    if (saved?.username && saved?.password) return saved;
+  } catch { /* Storage can be disabled or hold bad data. */ }
+  const account = newAccount();
+  try {
+    localStorage.setItem(accountKey, JSON.stringify(account));
+  } catch { /* Without storage, the account lasts until this page closes. */ }
+  return account;
+}
 
 loginForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (client) return;
   let url;
   try {
-    url = secureRelayURL(relayURL.value);
+    url = secureRelayURL(savedRelay);
   } catch {
-    status.textContent = 'Enter a wss:// relay URL. Put the relay token in its own field.';
+    status.textContent = 'Add your relay URL in Settings first.';
     return;
   }
+  let username = $('#soulseek-user').value.trim();
+  let password = $('#soulseek-password').value;
+  if (!username !== !password) {
+    status.textContent = 'Enter both your Soulseek username and password, or leave both empty to use this browser\'s account.';
+    return;
+  }
+  if (!username) ({ username, password } = browserAccount());
   const relayToken = $('#relay-token').value;
-  const username = $('#soulseek-user').value;
-  const password = $('#soulseek-password').value;
   $('#relay-token').value = '';
   $('#soulseek-password').value = '';
   const button = loginForm.querySelector('button');
@@ -288,8 +569,8 @@ loginForm.addEventListener('submit', async (event) => {
       if (client === connected) signOut('Relay disconnected. Sign in to reconnect.');
     };
     connected.closed.then(dropped, dropped);
-    showSession(true);
-    status.textContent = 'Signed in to Soulseek.';
+    showView();
+    status.textContent = `Signed in to Soulseek as ${username}.`;
     query.focus();
   } catch (error) {
     status.textContent = error?.reason
@@ -300,43 +581,13 @@ loginForm.addEventListener('submit', async (event) => {
   }
 });
 
-searchForm.addEventListener('submit', async (event) => {
+searchForm.addEventListener('submit', (event) => {
   event.preventDefault();
   const text = query.value.trim();
   if (!client || !text) return;
-  search?.abort();
-  const controller = new AbortController();
-  search = controller;
-  rows = [];
-  renderResults();
-  searching.hidden = false;
-  status.textContent = `Searching for ${text}…`;
-  try {
-    await client.search(text, {
-      signal: controller.signal,
-      onResult: (result) => {
-        if (search !== controller) return;
-        rows = addResult(rows, result);
-        scheduleRender();
-      },
-    });
-  } catch {
-    if (search === controller) status.textContent = 'The search stopped early. Try again.';
-    return;
-  } finally {
-    if (search === controller) {
-      search = undefined;
-      searching.hidden = true;
-    }
-  }
-  if (controller.signal.aborted) return;
-  renderResults();
-  if (!rows.length) status.textContent = 'No playable songs found. Try other words.';
-  else if (rows.length === RESULT_LIMIT) status.textContent = `Showing the best ${RESULT_LIMIT} files.`;
-  else status.textContent = `Found ${rows.length} ${rows.length === 1 ? 'file' : 'files'}.`;
+  if (mode.value === 'album') findAlbums(text);
+  else findSongs(text);
 });
 
-downloadButton.addEventListener('click', () => {
-  if (selected) download(selected);
-});
 $('#soulseek-disconnect').addEventListener('click', () => signOut('Disconnected.'));
+resetFind();
