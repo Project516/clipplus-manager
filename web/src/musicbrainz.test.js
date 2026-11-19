@@ -28,6 +28,15 @@ test('keeps one row per song from the best release, closest match first', async 
   ]);
 });
 
+// core/src/musicbrainz.rs checks the same two orders.
+test('ranks accents and vowel signs like the desktop', () => {
+  const order = (query, recordings) => parseRecordings({
+    recordings: recordings.map(([id, title, score]) => ({ id, title, score, 'artist-credit': [{ name: 'Band' }], releases: [] })),
+  }, query).map((row) => row.id);
+  assert.deepEqual(order('band cafe', [['plain', 'cafe', 90], ['accent', 'cafe\u0301', 100]]), ['accent', 'plain']);
+  assert.deepEqual(order('band \u0915', [['sign', '\u0915\u093e', 100], ['bare', '\u0915', 90]]), ['bare', 'sign']);
+});
+
 test('ranks by fewest extra words, then score, then releases, then order', () => {
   const albums = (count) => Array.from({ length: count }, (_, n) => ({ title: `Album ${n}`, status: 'Official', date: '2000' }));
   const recording = (key, title, artist, score, releases) => ({

@@ -353,6 +353,35 @@ mod tests {
         assert_eq!(words("Band \u{915}\u{93e}"), ["band", "\u{915}\u{93e}"]);
     }
 
+    // web/src/musicbrainz.test.js checks the same two orders.
+    #[test]
+    fn ranks_accents_and_vowel_signs_like_the_web() {
+        let order = |query: &str, recordings: Vec<Value>| -> Vec<String> {
+            let results: Results =
+                serde_json::from_value(json!({"recordings": recordings})).unwrap();
+            rank(results.recordings, query)
+                .into_iter()
+                .map(|r| r.id)
+                .collect()
+        };
+        let accent = order(
+            "band cafe",
+            vec![
+                recording("plain", "cafe", "Band", 90, vec![]),
+                recording("accent", "cafe\u{301}", "Band", 100, vec![]),
+            ],
+        );
+        assert_eq!(accent, ["accent", "plain"]);
+        let sign = order(
+            "band \u{915}",
+            vec![
+                recording("sign", "\u{915}\u{93e}", "Band", 100, vec![]),
+                recording("bare", "\u{915}", "Band", 90, vec![]),
+            ],
+        );
+        assert_eq!(sign, ["bare", "sign"]);
+    }
+
     #[test]
     fn ranks_by_fewest_extra_words_then_score_then_releases() {
         let body = json!({"recordings": [
