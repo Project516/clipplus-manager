@@ -6,14 +6,40 @@ export function secureRelayURL(value) {
   return url;
 }
 
-export async function lookupPeer(protocol, relay, username) {
-  relay.send(await protocol.encodeGetPeerAddress(username));
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
-    const frame = await relay.receive({ timeout: Math.max(1, deadline - Date.now()) });
-    if (new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(4, true) !== 3) continue;
-    const peer = await protocol.decodeGetPeerAddress(frame);
-    if (peer.username === username) return peer;
+export function createPeerLookup(protocol, relay, onDisconnect) {
+  let pending;
+
+  async function receive() {
+    for (;;) {
+      const frame = await relay.receive();
+      if (!pending || new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(4, true) !== 3) continue;
+      const lookup = pending;
+      try {
+        const peer = await protocol.decodeGetPeerAddress(frame);
+        if (peer.username === lookup.username) lookup.resolve(peer);
+      } catch (error) {
+        lookup.reject(error);
+      }
+    }
   }
-  throw new Error('Peer address lookup timed out');
+
+  receive().catch((error) => {
+    pending?.reject(error);
+    onDisconnect();
+  });
+
+  return async (username) => {
+    const frame = await protocol.encodeGetPeerAddress(username);
+    const { promise, resolve, reject } = Promise.withResolvers();
+    pending = { username, resolve, reject };
+    // The package's receive timeout closes the relay.
+    const timeout = setTimeout(() => resolve(null), 15000);
+    try {
+      relay.send(frame);
+      return await promise;
+    } finally {
+      clearTimeout(timeout);
+      pending = undefined;
+    }
+  };
 }

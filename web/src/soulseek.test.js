@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createProtocol } from '@project516/nicotine-plus-wasm';
-import { lookupPeer, secureRelayURL } from './soulseek.js';
+import { createPeerLookup, secureRelayURL } from './soulseek.js';
 
 test('accepts only secure relay URLs without embedded credentials', () => {
   assert.equal(secureRelayURL('wss://relay.invalid/socket').pathname, '/socket');
@@ -26,11 +26,19 @@ test('encodes a search and looks up a peer using Soulseek frame fixtures', async
     bytes('1a000000030000000400000070656572010200c0f9160000000000000000'),
   ];
   const sent = [];
+  const request = Promise.withResolvers();
   const relay = {
-    send: (frame) => sent.push(frame),
-    receive: async () => incoming.shift(),
+    send(frame) {
+      sent.push(frame);
+      request.resolve();
+    },
+    async receive() {
+      await request.promise;
+      return incoming.shift() ?? new Promise(() => {});
+    },
   };
-  assert.deepEqual(await lookupPeer(protocol, relay, 'peer'), {
+  const lookupPeer = createPeerLookup(protocol, relay, assert.fail);
+  assert.deepEqual(await lookupPeer('peer'), {
     username: 'peer',
     ipAddress: [192, 0, 2, 1].join('.'),
     port: 5881,

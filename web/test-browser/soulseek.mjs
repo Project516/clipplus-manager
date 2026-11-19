@@ -11,6 +11,7 @@ test('signs in, sends a search, and shows a peer address through a relay fixture
   const page = await browser.newPage();
   const relayURL = 'wss://relay.invalid/socket';
   const sent = [];
+  const missingPeerRequest = Promise.withResolvers();
 
   await page.routeWebSocket(relayURL, (socket) => {
     socket.onMessage((message) => {
@@ -24,6 +25,10 @@ test('signs in, sends a search, and shows a peer address through a relay fixture
           socket.send(Buffer.from('12000000010000000100000000010000c00000000000', 'hex'));
           break;
         case 3:
+          if (message.toString('utf8', 12) === 'missing') {
+            missingPeerRequest.resolve();
+            break;
+          }
           socket.send(Buffer.from('1a000000030000000400000070656572010200c0f9160000000000000000', 'hex'));
           break;
       }
@@ -53,6 +58,17 @@ test('signs in, sends a search, and shows a peer address through a relay fixture
   assert.equal(sent[2].readUInt32LE(4), 26);
   assert.equal(sent[2].toString('utf8', 16), 'test');
   assert.equal(sent[3].toString('hex'), '0c000000030000000400000070656572');
+
+  await page.clock.install();
+  await page.getByLabel('Peer username').fill('missing');
+  await page.getByRole('button', { name: 'Look up peer address' }).click();
+  await missingPeerRequest.promise;
+  await page.clock.fastForward(15_001);
+  await page.getByText('The peer address lookup timed out.', { exact: true }).waitFor();
+
+  await page.getByLabel('Peer username').fill('peer');
+  await page.getByRole('button', { name: 'Look up peer address' }).click();
+  await page.getByText(`peer · ${[192, 0, 2, 1].join('.')}:5881`, { exact: true }).waitFor();
 
   await page.getByRole('button', { name: 'Disconnect' }).click();
   await page.getByText('Disconnected.', { exact: true }).waitFor();
