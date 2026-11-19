@@ -176,8 +176,10 @@ function fixQueued(blob, extension, signal, onProgress) {
     }
   };
   const result = fixing.then(run, run);
-  fixing = result.catch(() => {});
-  return result;
+  fixing = result.then(() => {}, () => {});
+  const aborted = new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  aborted.catch(() => {});
+  return Promise.race([result, aborted]);
 }
 
 async function download(file) {
