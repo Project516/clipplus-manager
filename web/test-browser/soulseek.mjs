@@ -144,9 +144,10 @@ test('signs in, finds a song, downloads, and saves it with a mock client', { tim
   await page.getByRole('heading', { name: 'Choose a file', level: 2 }).waitFor();
   assert.equal(await page.locator('#soulseek-track').textContent(), 'The Glass Harbor · Northern Lights');
   const rows = page.locator('#soulseek-results label');
-  assert.deepEqual(await rows.locator('.file-name').allTextContents(), ['02 Free.mp3', '04 Missing.mp3', '01 Song.mp3', '03 Slow.flac']);
+  assert.deepEqual(await rows.locator('.file-name').allTextContents(), ['02 Free.mp3', '04 Missing.mp3', '03 Slow.flac', '01 Song.mp3']);
   const row = (name) => rows.filter({ hasText: name });
-  assert.equal(await row('01 Song.mp3').locator('.file-details').textContent(), 'queue-user · 5.0 MB · 320 kbps · 3:45');
+  assert.equal(await row('01 Song.mp3').locator('.file-details').textContent(), 'queue-user · queue 4 · 5.0 MB · 320 kbps · 3:45');
+  assert.equal(await row('02 Free.mp3').locator('.file-details').textContent(), 'free-user · free slot · 2.4 MB · 192 kbps · 1:01');
   const downloadButton = page.getByRole('button', { name: 'Download', exact: true });
   const fullAlbumButton = page.getByRole('button', { name: 'Download full album' });
   assert.equal(await downloadButton.isDisabled(), true);
@@ -238,11 +239,11 @@ test('finds an album folder, saves its songs as a zip, and cancels the rest', { 
   await page.getByRole('heading', { name: 'Choose an album folder', level: 2 }).waitFor();
   assert.equal(await page.locator('#soulseek-track').textContent(), 'glass harbor tidewater');
   const rows = page.locator('#soulseek-results label');
-  assert.deepEqual(await rows.locator('.file-name').allTextContents(), ['Tidewater (2019)', 'Glass Harbor - Tidewater', 'Locked']);
+  assert.deepEqual(await rows.locator('.file-name').allTextContents(), ['Locked', 'Tidewater (2019)', 'Glass Harbor - Tidewater']);
   assert.deepEqual(await rows.locator('.file-details').allTextContents(), [
-    'quiet-keeper · 4 songs · mp3',
-    'salt-marsh · 2 songs · flac',
-    'harbor-light · 1 song · mp3',
+    'harbor-light · free slot · 1 song · mp3',
+    'quiet-keeper · free slot · 4 songs · mp3',
+    'salt-marsh · queue 518 · 2 songs · flac',
   ]);
   const row = (name) => rows.filter({ hasText: name });
   const downloadButton = page.getByRole('button', { name: 'Download album' });

@@ -4,7 +4,7 @@ import { fixForSansa } from './fixer.js';
 import { recordingDetails, searchRecordings } from './musicbrainz.js';
 import { safeName } from './output.js';
 import {
-  PLAYABLE, RESULT_LIMIT, addResult, albumDetails, albumKey, baseName, describeProgress, fileDetails, fileKey,
+  PLAYABLE, RESULT_LIMIT, addResult, albumDetails, albumRank, albumKey, baseName, describeProgress, fileDetails, fileKey,
   formatSize, groupAlbumFiles, newAccount, parentFolder, plural, secureRelayURL,
 } from './soulseek.js';
 import { uniqueName, zipStored } from './zip.js';
@@ -471,7 +471,7 @@ function findAlbums(text) {
     text,
     heading: 'Choose an album folder',
     trackText: text,
-    add: (result) => { rows = [...groupAlbumFiles(groups, result).values()]; },
+    add: (result) => { rows = [...groupAlbumFiles(groups, result).values()].sort(albumRank); },
     summary: () => {
       if (!rows.length) return 'No album folders found. Try other words.';
       if (rows.length === RESULT_LIMIT) return `Showing the first ${RESULT_LIMIT} album folders.`;

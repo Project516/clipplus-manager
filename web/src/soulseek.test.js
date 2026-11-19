@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { addResult, albumDetails, baseName, describeProgress, fileDetails, formatDuration, formatSize, groupAlbumFiles, newAccount, parentFolder, plural, secureRelayURL } from './soulseek.js';
+import { addResult, albumDetails, albumRank, baseName, describeProgress, fileDetails, formatDuration, formatSize, groupAlbumFiles, newAccount, parentFolder, plural, secureRelayURL } from './soulseek.js';
 
 test('makes an account shaped like the desktop one', () => {
   const account = newAccount();
@@ -18,14 +18,15 @@ test('accepts only secure relay URLs without embedded credentials', () => {
 });
 
 const file = (name, extra = {}) => ({ path: `Music\\${name}`, name, size: 1, extension: name.split('.').pop(), ...extra });
-const peer = (username, freeSlot, uploadSpeed, files) => ({ username, freeSlot, queueLength: 0, uploadSpeed, files });
+const peer = (username, freeSlot, uploadSpeed, files, queueLength = 0) => ({ username, freeSlot, queueLength, uploadSpeed, files });
 
-test('keeps playable files, mp3 first, then free slots, then upload speed', () => {
-  let rows = addResult([], peer('busy', false, 9, [file('a.mp3'), file('cover.jpg'), file('b.flac')]));
+test('keeps playable files: free slots, shorter queues, mp3, then upload speed', () => {
+  let rows = addResult([], peer('busy', false, 9, [file('a.mp3'), file('cover.jpg'), file('b.flac')], 4));
   rows = addResult(rows, peer('free', true, 1, [file('c.ogg'), file('d.mp3'), file('e.wav')]));
   rows = addResult(rows, peer('fast', true, 5, [file('f.mp3'), file('g.opus'), file('h.m4a')]));
+  rows = addResult(rows, peer('short', false, 1, [file('i.flac')], 2));
   assert.deepEqual(rows.map((row) => `${row.username}/${row.name}`), [
-    'fast/f.mp3', 'free/d.mp3', 'busy/a.mp3', 'fast/g.opus', 'fast/h.m4a', 'free/c.ogg', 'busy/b.flac',
+    'fast/f.mp3', 'free/d.mp3', 'fast/g.opus', 'fast/h.m4a', 'free/c.ogg', 'short/i.flac', 'busy/a.mp3', 'busy/b.flac',
   ]);
 });
 
@@ -42,7 +43,7 @@ test('caps the list at the best results', () => {
   assert.deepEqual(rows.map((row) => row.name), ['x.mp3', '0.flac', '1.flac']);
 });
 
-const found = (username, ...paths) => ({ username, files: paths.map((path) => ({ path, name: path.split(/[\\/]/).pop(), size: 1 })) });
+const found = (username, ...paths) => ({ username, freeSlot: true, queueLength: 0, uploadSpeed: 1, files: paths.map((path) => ({ path, name: path.split(/[\\/]/).pop(), size: 1 })) });
 
 test('groups audio files into album folders per user', () => {
   const groups = groupAlbumFiles(new Map(), found('peer',
@@ -58,8 +59,18 @@ test('groups audio files into album folders per user', () => {
 
 test('names the most common format and counts a repeated file once', () => {
   const groups = groupAlbumFiles(new Map(), found('peer', 'A\\B\\1.flac', 'A\\B\\2.mp3', 'A\\B\\3.mp3', 'A\\B\\3.mp3'));
-  assert.deepEqual([...groups.values()].map(albumDetails), ['peer · 3 songs · mp3']);
-  assert.equal(albumDetails({ username: 'peer', songs: 1, format: 'ogg' }), 'peer · 1 song · ogg');
+  assert.deepEqual([...groups.values()].map(albumDetails), ['peer · free slot · 3 songs · mp3']);
+  assert.equal(albumDetails({ username: 'peer', freeSlot: false, queueLength: 7, songs: 1, format: 'ogg' }), 'peer · queue 7 · 1 song · ogg');
+});
+
+test('ranks album folders by free slot, queue length, then upload speed', () => {
+  const groups = new Map();
+  const add = (username, freeSlot, queueLength, uploadSpeed) => groupAlbumFiles(groups, { ...found(username, 'A\\B\\1.mp3'), freeSlot, queueLength, uploadSpeed });
+  add('long', false, 9, 9);
+  add('short', false, 2, 1);
+  add('slow', true, 0, 1);
+  add('fast', true, 0, 5);
+  assert.deepEqual([...groups.values()].sort(albumRank).map((group) => group.username), ['fast', 'slow', 'short', 'long']);
 });
 
 test('caps album folders but still counts songs in the ones kept', () => {
@@ -82,8 +93,8 @@ test('describes files and progress for the panel', () => {
   assert.equal(formatSize(8_400_000), '8.4 MB');
   assert.equal(formatDuration(225.4), '3:45');
   assert.equal(formatDuration(59.6), '1:00');
-  assert.equal(fileDetails({ username: 'peer', size: 5e6, bitrate: 320, duration: 61 }), 'peer · 5.0 MB · 320 kbps · 1:01');
-  assert.equal(fileDetails({ username: 'peer', size: 5e6 }), 'peer · 5.0 MB');
+  assert.equal(fileDetails({ username: 'peer', freeSlot: true, size: 5e6, bitrate: 320, duration: 61 }), 'peer · free slot · 5.0 MB · 320 kbps · 1:01');
+  assert.equal(fileDetails({ username: 'peer', freeSlot: false, queueLength: 518, size: 5e6 }), 'peer · queue 518 · 5.0 MB');
   assert.deepEqual(describeProgress({ state: 'connecting' }), { text: 'Connecting to the user', fraction: null });
   assert.deepEqual(describeProgress({ state: 'queued', position: 3 }), { text: 'Queued, position 3', fraction: null });
   assert.deepEqual(describeProgress({ state: 'queued' }), { text: 'Queued by the user', fraction: null });

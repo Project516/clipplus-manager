@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::cmp::Ordering;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -13,13 +14,44 @@ use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tungstenite::{Message, client::IntoClientRequest};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PeerFile {
     pub username: String,
     pub filename: String,
     pub size: u64,
     pub length: Option<u64>,
     pub bitrate: Option<u64>,
+    // Saved queues from older versions have no peer fields.
+    #[serde(default)]
+    pub free_slot: bool,
+    #[serde(default)]
+    pub queue_length: u64,
+    #[serde(default)]
+    pub upload_speed: u64,
+}
+
+fn peer_order(a: &PeerFile, b: &PeerFile) -> Ordering {
+    b.free_slot
+        .cmp(&a.free_slot)
+        .then(a.queue_length.cmp(&b.queue_length))
+}
+
+fn is_mp3(file: &PeerFile) -> bool {
+    file.filename
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("mp3"))
+}
+
+// Same order as rank() in web/src/soulseek.js. A peer with no free slot or a
+// long queue often never starts the download.
+fn file_order(a: &PeerFile, b: &PeerFile) -> Ordering {
+    peer_order(a, b)
+        .then(is_mp3(b).cmp(&is_mp3(a)))
+        .then(b.upload_speed.cmp(&a.upload_speed))
+}
+
+fn album_order(a: &PeerFile, b: &PeerFile) -> Ordering {
+    peer_order(a, b).then(b.upload_speed.cmp(&a.upload_speed))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,7 +492,7 @@ fn encode(s: &str) -> String {
         .collect()
 }
 fn parse_results(value: &Value) -> Vec<PeerFile> {
-    value
+    let mut files: Vec<PeerFile> = value
         .as_array()
         .into_iter()
         .flatten()
@@ -470,6 +502,18 @@ fn parse_results(value: &Value) -> Vec<PeerFile> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let free_slot = response
+                .get("hasFreeUploadSlot")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let queue_length = response
+                .get("queueLength")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let upload_speed = response
+                .get("uploadSpeed")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             response
                 .get("files")
                 .and_then(Value::as_array)
@@ -487,10 +531,15 @@ fn parse_results(value: &Value) -> Vec<PeerFile> {
                         size,
                         length: file.get("length").and_then(Value::as_u64),
                         bitrate: file.get("bitRate").and_then(Value::as_u64),
+                        free_slot,
+                        queue_length,
+                        upload_speed,
                     })
                 })
         })
-        .collect()
+        .collect();
+    files.sort_by(file_order);
+    files
 }
 
 fn is_audio(name: &str) -> bool {
@@ -522,11 +571,14 @@ pub fn album_candidates(files: Vec<PeerFile>) -> Vec<PeerFile> {
                 username: file.username,
                 filename: directory.to_string(),
                 size: 1,
-                length: None,
-                bitrate: None,
+                free_slot: file.free_slot,
+                queue_length: file.queue_length,
+                upload_speed: file.upload_speed,
+                ..PeerFile::default()
             });
         }
     }
+    folders.sort_by(album_order);
     folders
 }
 
@@ -556,6 +608,7 @@ fn parse_directory(value: &Value, username: &str, directory: &str) -> Vec<PeerFi
                 size,
                 length: file.get("length").and_then(Value::as_u64),
                 bitrate: file.get("bitRate").and_then(Value::as_u64),
+                ..PeerFile::default()
             })
         })
         .collect()
@@ -610,6 +663,53 @@ mod tests {
         assert_eq!(files[0].length, Some(180));
         assert_eq!(encode(&files[0].username), "user%2Fone");
         assert!(!valid_component("../x"));
+    }
+
+    fn peer_response(name: &str, free: bool, queue: u64, speed: u64, file: &str) -> Value {
+        json!({"username":name, "hasFreeUploadSlot":free, "queueLength":queue, "uploadSpeed":speed,
+            "files":[{"filename":format!("Artist\\Album\\{file}"), "size":100}]})
+    }
+
+    #[test]
+    fn ranks_files_by_slot_queue_format_then_speed() {
+        let files = parse_results(&json!([
+            peer_response("long", false, 518, 9, "a.mp3"),
+            peer_response("short", false, 2, 1, "b.flac"),
+            peer_response("slow", true, 0, 1, "c.mp3"),
+            peer_response("flac", true, 0, 9, "d.flac"),
+            peer_response("fast", true, 0, 5, "e.MP3"),
+        ]));
+        let names: Vec<_> = files.iter().map(|f| f.username.as_str()).collect();
+        assert_eq!(names, ["fast", "slow", "flac", "short", "long"]);
+        assert!(files[0].free_slot && files[0].upload_speed == 5);
+        assert_eq!((files[4].free_slot, files[4].queue_length), (false, 518));
+    }
+
+    #[test]
+    fn album_folders_carry_and_rank_by_peer_queue() {
+        let results = parse_results(&json!([
+            peer_response("long", false, 518, 9, "01.mp3"),
+            peer_response("short", false, 2, 1, "01.mp3"),
+            peer_response("slow", true, 0, 1, "01.mp3"),
+            peer_response("fast", true, 0, 5, "01.mp3"),
+        ]));
+        let folders = album_candidates(results.into_iter().rev().collect());
+        let names: Vec<_> = folders.iter().map(|f| f.username.as_str()).collect();
+        assert_eq!(names, ["fast", "slow", "short", "long"]);
+        assert_eq!(folders[2].queue_length, 2);
+        assert!(folders[0].free_slot);
+    }
+
+    #[test]
+    fn saved_files_without_peer_fields_still_load() {
+        let file: PeerFile = serde_json::from_value(
+            json!({"username":"peer","filename":"a.mp3","size":5,"length":null,"bitrate":null}),
+        )
+        .unwrap();
+        assert_eq!(
+            (file.free_slot, file.queue_length, file.upload_speed),
+            (false, 0, 0)
+        );
     }
 
     #[test]
