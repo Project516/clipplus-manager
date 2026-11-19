@@ -47,8 +47,9 @@ h1 { margin: 0; font-size: 1.25rem; font-weight: 600; }
 .description { margin: 0 0 16px; color: var(--muted); }
 .player label, .settings label { display: block; margin-bottom: 5px; }
 .entry { display: flex; gap: 8px; }
-input { width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface); color: var(--text); font: inherit; }
-input:focus { border-color: var(--accent); }
+input, select { min-width: 0; padding: 7px 9px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface); color: var(--text); font: inherit; }
+input { width: 100%; }
+input:focus, select:focus { border-color: var(--accent); }
 .player .sponsorblock { margin-top: 8px; }
 .sponsorblock input { width: auto; margin-inline: 0 4px; }
 button, .save { padding: 7px 16px; border: 1px solid var(--border); border-radius: 3px; background: var(--window); color: var(--text); font: inherit; text-decoration: none; cursor: pointer; white-space: nowrap; }
@@ -60,7 +61,7 @@ button:disabled { opacity: .6; cursor: progress; }
 .screen .screen-detail { color: var(--muted); font-size: .9rem; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .screen .screen-detail.message { display: block; }
 .meter { height: 6px; margin-top: 10px; overflow: hidden; background: var(--window); border-radius: 3px; }
-.meter[hidden], .save[hidden] { display: none; }
+[hidden] { display: none !important; }
 .meter span { display: block; height: 100%; width: 0; background: var(--accent); }
 .meter.busy span { width: 25%; animation: scan 1.4s ease-in-out infinite alternate; }
 .save { display: inline-block; margin-top: 12px; }
@@ -96,7 +97,15 @@ button:disabled { opacity: .6; cursor: progress; }
 .settings .file-details.done { color: var(--positive); }
 .files .meter { margin-top: 6px; }
 .files .save { margin-top: 0; }
-.settings-actions.end { justify-content: flex-end; }
+.settings .step-title { margin: 0 0 8px; color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.settings .tracks { margin: 4px 0 0; padding: 0; list-style: none; font-size: .85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tracks li { overflow-wrap: anywhere; }
+.tracks .failed { color: var(--negative); }
+.settings .jobs .file-details { white-space: normal; overflow-wrap: anywhere; }
+.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.actions .spacer { flex: 1; }
+.settings .empty { margin-top: 16px; padding: 28px 16px; text-align: center; color: var(--muted); border: 1px dashed var(--border); border-radius: 3px; }
+.empty strong { display: block; color: var(--text); font-weight: 600; }
 footer { padding: 0 24px 24px; color: var(--muted); }
 @keyframes scan { to { transform: translateX(300%); } }
 @media (max-width: 600px) {

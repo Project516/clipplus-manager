@@ -27,6 +27,50 @@ export function addResult(rows, { username, freeSlot, queueLength, uploadSpeed, 
   return [...rows, ...added].sort(rank).slice(0, limit);
 }
 
+// Port of is_audio in core/src/slskd.rs. Album folders count every audio file.
+const AUDIO = ['mp3', 'flac', 'm4a', 'ogg', 'opus', 'wav', 'aac', 'wma', 'aiff', 'alac'];
+
+const lastSeparator = (path) => Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+export const baseName = (path) => path.slice(lastSeparator(path) + 1);
+export const albumKey = (username, folder) => `album\n${username}\n${folder}`;
+
+export function parentFolder(path) {
+  const end = lastSeparator(path);
+  return end > 0 ? path.slice(0, end) : undefined;
+}
+
+function extensionOf(path) {
+  const name = baseName(path);
+  return name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
+}
+
+// Port of album_candidates: one group per user and folder. Adds to `groups` in place.
+export function groupAlbumFiles(groups, { username, files }, limit = RESULT_LIMIT) {
+  for (const { path } of files) {
+    const extension = extensionOf(path);
+    const folder = parentFolder(path);
+    if (!AUDIO.includes(extension) || !folder) continue;
+    const key = albumKey(username, folder);
+    let group = groups.get(key);
+    if (!group && groups.size >= limit) continue;
+    if (!group) {
+      group = { username, folder, name: baseName(folder), songs: 0, format: extension, counts: new Map(), paths: new Set() };
+      groups.set(key, group);
+    }
+    if (group.paths.has(path)) continue;
+    group.paths.add(path);
+    group.songs += 1;
+    const count = (group.counts.get(extension) ?? 0) + 1;
+    group.counts.set(extension, count);
+    if (count > group.counts.get(group.format)) group.format = extension;
+  }
+  return groups;
+}
+
+export const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+
+export const albumDetails = ({ username, songs, format }) => [username, plural(songs, 'song'), format].join(' · ');
+
 export function formatSize(bytes) {
   return `${(bytes / 1e6).toFixed(1)} MB`;
 }

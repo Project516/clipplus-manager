@@ -1,0 +1,88 @@
+{
+  "created": "2000-01-01T00:00:00.000Z",
+  "count": 6,
+  "offset": 0,
+  "recordings": [
+    {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "title": "Northern Lights (Live)",
+      "length": 287000,
+      "artist-credit": [{ "name": "The Glass Harbor" }],
+      "releases": [
+        {
+          "title": "Live at the Pier",
+          "status": "Bootleg",
+          "date": "1990",
+          "release-group": { "primary-type": "Album", "secondary-types": ["Live"] }
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "title": "Northern Lights",
+      "length": 241000,
+      "artist-credit": [{ "name": "The Glass Harbor" }],
+      "releases": [
+        {
+          "title": "Greatest Tides",
+          "status": "Official",
+          "date": "2022",
+          "release-group": { "primary-type": "Album", "secondary-types": ["Compilation"] }
+        },
+        {
+          "title": "Tidewater (Promo)",
+          "status": "Promotion",
+          "date": "2018",
+          "release-group": { "primary-type": "Single", "secondary-types": [] }
+        },
+        {
+          "title": "Tidewater",
+          "status": "Official",
+          "date": "2019-05-03",
+          "release-group": { "primary-type": "Album", "secondary-types": [] }
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "title": "northern lights",
+      "length": 240000,
+      "artist-credit": [{ "name": "the glass harbor" }],
+      "releases": [
+        {
+          "title": "Demo Tape",
+          "status": "Bootleg",
+          "date": "2015",
+          "release-group": { "primary-type": "Album", "secondary-types": [] }
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "title": "Northern Lights",
+      "length": 198000,
+      "artist-credit": [
+        { "name": "Glass Harbor Trio", "joinphrase": " feat. " },
+        { "name": "Mira Salt" }
+      ],
+      "releases": [
+        {
+          "title": "Small Hours",
+          "status": "Official",
+          "date": "",
+          "release-group": { "primary-type": "Album", "secondary-types": ["Soundtrack"] }
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "title": "Lantern",
+      "artist-credit": [{ "name": "The Glass Harbor" }],
+      "releases": []
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000006",
+      "title": "Salt Air"
+    }
+  ]
+}

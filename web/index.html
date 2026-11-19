@@ -55,7 +55,7 @@
 
     <details class="settings" id="soulseek">
       <summary>Soulseek</summary>
-      <p>Search Soulseek for songs and save them for Rockbox on your Clip+. Sign in through your own secure WebSocket relay. The relay must allow this site's origin.</p>
+      <p>Find a song or an album and save it for your Clip+. Files come from Soulseek, so sign in through your own secure WebSocket relay. The relay must allow this site's origin.</p>
       <form id="soulseek-login" autocomplete="off">
         <label for="relay-url">Private relay URL (wss://)</label>
         <input id="relay-url" type="url" required>
@@ -69,28 +69,43 @@
         <div class="settings-actions"><button type="submit">Sign in</button></div>
       </form>
       <div id="soulseek-session" hidden>
+        <label for="soulseek-mode">Search for</label>
+        <select id="soulseek-mode"><option value="song">Song</option><option value="album">Album</option></select>
         <form id="soulseek-search">
-          <label for="soulseek-query">Search Soulseek</label>
+          <label for="soulseek-query" id="soulseek-query-label">Artist and song</label>
           <div class="entry">
             <input id="soulseek-query" type="search" placeholder="Artist and song" required>
             <button type="submit">Search</button>
           </div>
         </form>
         <div class="connection"><span class="badge">Connected to Soulseek</span><button id="soulseek-disconnect" type="button">Disconnect</button></div>
+        <div class="meter busy" id="soulseek-searching" role="progressbar" aria-label="Searching MusicBrainz" hidden><span></span></div>
       </div>
       <p id="soulseek-status" role="status"></p>
-      <div class="meter busy" id="soulseek-searching" role="progressbar" aria-label="Searching" hidden><span></span></div>
+      <div id="soulseek-pick" hidden>
+        <section id="soulseek-songs" aria-labelledby="soulseek-songs-heading" hidden>
+          <h2 id="soulseek-songs-heading">Choose a song</h2>
+          <div class="files choices" role="radiogroup" aria-labelledby="soulseek-songs-heading"></div>
+          <div class="actions"><button id="soulseek-find" type="button" disabled>Find downloads</button></div>
+        </section>
+        <div class="empty" id="soulseek-empty"><strong></strong><span></span></div>
+      </div>
+      <section id="soulseek-results" aria-labelledby="soulseek-results-heading" hidden>
+        <h2 id="soulseek-results-heading">Choose a file</h2>
+        <p class="step-title" id="soulseek-track"></p>
+        <div class="meter busy" id="soulseek-peer-searching" role="progressbar" aria-label="Searching Soulseek" hidden><span></span></div>
+        <div class="files choices" role="radiogroup" aria-labelledby="soulseek-results-heading"></div>
+        <div class="actions">
+          <button id="soulseek-back" type="button">Back</button>
+          <span class="spacer"></span>
+          <button id="soulseek-full-album" type="button" disabled>Download full album</button>
+          <button id="soulseek-download" type="button" disabled>Download</button>
+        </div>
+      </section>
       <section id="soulseek-downloads" aria-labelledby="soulseek-downloads-heading" hidden>
         <div class="section-header"><h2 id="soulseek-downloads-heading">Downloads</h2><button id="soulseek-clear" type="button" disabled>Clear finished</button></div>
         <ul class="files jobs"></ul>
       </section>
-      <div id="soulseek-files" hidden>
-        <section id="soulseek-results" aria-labelledby="soulseek-results-heading" hidden>
-          <h2 id="soulseek-results-heading">Choose a file</h2>
-          <div class="files choices" role="radiogroup" aria-labelledby="soulseek-results-heading"></div>
-          <div class="settings-actions end"><button id="soulseek-download" type="button" disabled>Download</button></div>
-        </section>
-      </div>
     </details>
 
     <footer>Copy saved songs into the <strong>Tracks</strong> folder on your Clip+'s SD card.</footer>

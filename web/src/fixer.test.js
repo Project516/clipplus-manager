@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
-import { fixForSansa, id3Size, parseProbe, plan, verify } from './fixer.js';
+import { fixForSansa, id3Size, parseProbe, plan, tagArgs, verify } from './fixer.js';
 
 const audio = (codec, rate, bits, channels = 2) => ({ audio: { codec, rate, bits, channels }, hasArt: false, tags: {} });
 
@@ -50,6 +50,19 @@ test('reads ffprobe output like the desktop fixer', () => {
   assert.equal(id3Size(Uint8Array.from([0xff, 0xfb])), 0);
 });
 
+test('writes the given tags and falls back to the artist as album', () => {
+  const info = (tags) => ({ audio: undefined, hasArt: false, tags });
+  const tag = (...pairs) => pairs.flatMap(([key, value]) => ['-metadata', `${key}=${value}`]);
+  const song = { title: 'Song', artist: 'Band', album: 'Record' };
+  assert.deepEqual(tagArgs(info({}), undefined), []);
+  assert.deepEqual(tagArgs(info({ artist: ' Tagged ' }), undefined), tag(['album', 'Tagged']));
+  assert.deepEqual(tagArgs(info({ artist: 'Tagged', album: 'Kept' }), undefined), []);
+  assert.deepEqual(tagArgs(info({ artist: 'Tagged', album: 'Kept' }), song), tag(['title', 'Song'], ['artist', 'Band'], ['album', 'Record']));
+  assert.deepEqual(tagArgs(info({ album: 'Kept' }), { title: 'Song', artist: 'Band' }), tag(['title', 'Song'], ['artist', 'Band']));
+  assert.deepEqual(tagArgs(info({ artist: 'Tagged' }), { title: 'Song', artist: 'Band' }), tag(['title', 'Song'], ['artist', 'Band'], ['album', 'Band']));
+  assert.deepEqual(tagArgs(info({ artist: 'Tagged' }), { title: 'Song', artist: ' ' }), tag(['title', 'Song'], ['artist', ' ']));
+});
+
 test('FFmpeg WebAssembly fixes cover art, hi-res FLAC, and surround audio', async (t) => {
   const require = createRequire(import.meta.url);
   // The core expects a worker location even when the test supplies the WASM bytes.
@@ -83,6 +96,14 @@ test('FFmpeg WebAssembly fixes cover art, hi-res FLAC, and surround audio', asyn
   assert.equal(artInfo.hasArt, false);
   assert.equal(artInfo.tags.title, 'Fixture Tone');
   assert.equal(artInfo.tags.album, 'Fixture Artist');
+
+  const tagged = await fixForSansa(ffmpeg, await fixture('art.mp3'), 'mp3', { title: 'Given Title', artist: 'Given Artist', album: 'Given Album' });
+  assert.deepEqual(
+    (({ title, artist, album }) => ({ title, artist, album }))((await probe(tagged.bytes, 'mp3')).tags),
+    { title: 'Given Title', artist: 'Given Artist', album: 'Given Album' },
+  );
+  const noAlbum = await fixForSansa(ffmpeg, await fixture('art.mp3'), 'mp3', { title: 'Given Title', artist: 'Given Artist' });
+  assert.equal((await probe(noAlbum.bytes, 'mp3')).tags.album, 'Given Artist', 'album falls back to the given artist');
 
   const hires = await fixForSansa(ffmpeg, await fixture('hires.flac'), 'flac');
   assert.equal(hires.ext, 'flac');
