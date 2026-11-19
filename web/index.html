@@ -17,7 +17,7 @@
       <span>ClipPlus Manager</span>
     </header>
 
-    <nav aria-label="Pages"><a class="nav-current" href="#downloads">Downloads</a><a id="settings-link" href="#settings">Settings</a></nav>
+    <nav aria-label="Pages"><a class="nav-current" href="#downloads">Downloads</a><a href="#soulseek">Soulseek</a><a id="settings-link" href="#settings">Settings</a></nav>
     </aside>
     <section class="content" id="downloads">
     <header class="page-header"><h1>Downloads</h1></header>
@@ -53,9 +53,40 @@
       <p class="note">Your proxy URL and key stay in this browser.</p>
     </details>
 
+    <details class="settings" id="soulseek">
+      <summary>Soulseek</summary>
+      <p>Sign in through your own secure WebSocket relay. The relay must allow this site's origin. Search results and file downloads are unavailable.</p>
+      <form id="soulseek-login" autocomplete="off">
+        <label for="relay-url">Private relay URL (wss://)</label>
+        <input id="relay-url" type="url" required>
+        <label for="relay-token">Relay token</label>
+        <input id="relay-token" type="password" required>
+        <label for="soulseek-user">Soulseek username</label>
+        <input id="soulseek-user" required>
+        <label for="soulseek-password">Soulseek password</label>
+        <input id="soulseek-password" type="password" required>
+        <div class="settings-actions"><button type="submit" class="secondary">Sign in</button></div>
+      </form>
+      <div id="soulseek-session" hidden>
+        <form id="soulseek-search">
+          <label for="soulseek-query">Search query</label>
+          <input id="soulseek-query" required>
+          <div class="settings-actions"><button type="submit" class="secondary">Send search request</button></div>
+        </form>
+        <form id="soulseek-peer">
+          <label for="soulseek-peer-user">Peer username</label>
+          <input id="soulseek-peer-user" required>
+          <div class="settings-actions"><button type="submit" class="secondary">Look up peer address</button></div>
+        </form>
+        <div class="settings-actions"><button id="soulseek-disconnect" type="button" class="secondary">Disconnect</button></div>
+      </div>
+      <p id="soulseek-status" role="status"></p>
+    </details>
+
     <footer>Copy the saved MP3 into the <strong>Tracks</strong> folder on your Clip+'s SD card.</footer>
     </section>
   </main>
   <script type="module" src="/src/main.js"></script>
+  <script type="module" src="/src/soulseek-ui.js"></script>
 </body>
 </html>
