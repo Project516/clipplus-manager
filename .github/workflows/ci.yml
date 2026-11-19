@@ -31,4 +31,4 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
-      - run: pnpm run build
+      - run: pnpm run test:browser

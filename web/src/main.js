@@ -1,9 +1,7 @@
 import './style.css';
 import { createYtDlp } from '@project516/yt-dlp-wasm';
-import { FFmpeg } from '@ffmpeg/ffmpeg';
-import coreURL from '../node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js?url';
-import wasmURL from '../node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.wasm?url';
-import { explain, safeName, validateMp3 } from './output.js';
+import { FFmpeg, ffmpegCore } from './ffmpeg.js';
+import { explain, offerSave, releaseSave, safeName, validateMp3 } from './output.js';
 import { sponsorBlockAudioArgs, sponsorBlockLookup } from './sponsorblock.js';
 
 // The wheel name changes with each yt-dlp release.
@@ -15,9 +13,13 @@ const save = $('#save');
 const meter = $('#meter');
 const sponsorBlock = $('#sponsorblock');
 
-$('#settings-link').addEventListener('click', () => {
-  $('#settings').open = true;
-});
+function openPanel(id) {
+  const panel = document.getElementById(id);
+  if (panel instanceof HTMLDetailsElement) panel.open = true;
+}
+for (const link of document.querySelectorAll('nav a')) link.addEventListener('click', () => openPanel(link.hash.slice(1)));
+openPanel(location.hash.slice(1));
+addEventListener('hashchange', () => openPanel(location.hash.slice(1)));
 
 // fraction: undefined hides the bar, null shows it busy, 0 to 1 fills it.
 // Messages the user must act on show in full; song titles are clamped.
@@ -33,7 +35,6 @@ function screen(title, detail = '', fraction, message = false) {
   else meter.setAttribute('aria-valuenow', value);
 }
 
-let downloadURL;
 try {
   proxy.value = localStorage.getItem('proxy') || '';
   key.value = localStorage.getItem('proxyKey') || '';
@@ -59,8 +60,7 @@ $('#download-form').addEventListener('submit', async (event) => {
     return;
   }
   $('#submit').disabled = true;
-  save.hidden = true;
-  if (downloadURL) URL.revokeObjectURL(downloadURL);
+  releaseSave(save);
   const removeSponsors = sponsorBlock.checked;
   let ytdlp;
   let ffmpeg;
@@ -86,7 +86,7 @@ $('#download-form').addEventListener('submit', async (event) => {
     ffmpeg.on('progress', ({ progress }) => {
       if (progress >= 0 && progress <= 1) screen('Converting', name, progress);
     });
-    await ffmpeg.load({ coreURL, wasmURL });
+    await ffmpeg.load(ffmpegCore);
     await ffmpeg.writeFile('input', files[0].data);
     const metadata = [];
     for (const [field, value] of Object.entries({ title: info.title, artist: info.artist || info.uploader, album: info.album || info.artist || info.uploader })) {
@@ -96,10 +96,7 @@ $('#download-form').addEventListener('submit', async (event) => {
     if (result !== 0) throw new Error('The audio could not be converted to MP3.');
     const bytes = await ffmpeg.readFile('output.mp3');
     validateMp3(bytes);
-    downloadURL = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
-    save.href = downloadURL;
-    save.download = safeName(files[0].name || info.title || 'audio');
-    save.hidden = false;
+    offerSave(save, new Blob([bytes], { type: 'audio/mpeg' }), safeName(files[0].name || info.title || 'audio'));
     screen('Ready to save', name, 1);
   } catch (error) {
     screen('Stopped', explain(error), undefined, true);

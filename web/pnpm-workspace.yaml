@@ -1,2 +1,6 @@
 allowBuilds:
   esbuild: false
+
+# Allow the pinned first-party release during its first day on npm.
+minimumReleaseAgeExclude:
+  - '@project516/nicotine-plus-wasm@0.2.0'

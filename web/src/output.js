@@ -1,7 +1,20 @@
-export function safeName(name) {
+export function safeName(name, extension = 'mp3') {
   let stem = name.replace(/\.[^.]*$/, '').replace(/[\x00-\x1f\x7f\\/:*?"<>|]/g, '_').replace(/[. ]+$/, '');
-  while (new TextEncoder().encode(stem).length > 242) stem = Array.from(stem).slice(0, -1).join('');
-  return `${stem || '_'}.mp3`;
+  while (new TextEncoder().encode(stem).length > 246 - extension.length) stem = Array.from(stem).slice(0, -1).join('');
+  return `${stem || '_'}.${extension}`;
+}
+
+export function releaseSave(link) {
+  if (link.href.startsWith('blob:')) URL.revokeObjectURL(link.href);
+  link.removeAttribute('href');
+  link.hidden = true;
+}
+
+export function offerSave(link, blob, name) {
+  releaseSave(link);
+  link.href = URL.createObjectURL(blob);
+  link.download = name;
+  link.hidden = false;
 }
 
 export function explain(error) {

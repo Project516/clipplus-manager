@@ -17,7 +17,7 @@
       <span>ClipPlus Manager</span>
     </header>
 
-    <nav aria-label="Pages"><a class="nav-current" href="#downloads">Downloads</a><a id="settings-link" href="#settings">Settings</a></nav>
+    <nav aria-label="Pages"><a class="nav-current" href="#downloads">Downloads</a><a href="#soulseek">Soulseek</a><a href="#settings">Settings</a></nav>
     </aside>
     <section class="content" id="downloads">
     <header class="page-header"><h1>Downloads</h1></header>
@@ -53,9 +53,50 @@
       <p class="note">Your proxy URL and key stay in this browser.</p>
     </details>
 
-    <footer>Copy the saved MP3 into the <strong>Tracks</strong> folder on your Clip+'s SD card.</footer>
+    <details class="settings" id="soulseek">
+      <summary>Soulseek</summary>
+      <p>Search Soulseek for songs and save them for Rockbox on your Clip+. Sign in through your own secure WebSocket relay. The relay must allow this site's origin.</p>
+      <form id="soulseek-login" autocomplete="off">
+        <label for="relay-url">Private relay URL (wss://)</label>
+        <input id="relay-url" type="url" required>
+        <p id="relay-access" hidden>If your relay uses Cloudflare Access, <a id="relay-access-link" target="_blank" rel="noopener noreferrer">sign in to the relay in a new tab</a>. When the page shows <code>ok</code>, return here and enter your relay token.</p>
+        <label for="relay-token">Relay token</label>
+        <input id="relay-token" type="password" required>
+        <label for="soulseek-user">Soulseek username</label>
+        <input id="soulseek-user" required>
+        <label for="soulseek-password">Soulseek password</label>
+        <input id="soulseek-password" type="password" required>
+        <div class="settings-actions"><button type="submit">Sign in</button></div>
+      </form>
+      <div id="soulseek-session" hidden>
+        <form id="soulseek-search">
+          <label for="soulseek-query">Search Soulseek</label>
+          <div class="entry">
+            <input id="soulseek-query" type="search" placeholder="Artist and song" required>
+            <button type="submit">Search</button>
+          </div>
+        </form>
+        <div class="connection"><span class="badge">Connected to Soulseek</span><button id="soulseek-disconnect" type="button">Disconnect</button></div>
+      </div>
+      <p id="soulseek-status" role="status"></p>
+      <div class="meter busy" id="soulseek-searching" role="progressbar" aria-label="Searching" hidden><span></span></div>
+      <section id="soulseek-downloads" aria-labelledby="soulseek-downloads-heading" hidden>
+        <div class="section-header"><h2 id="soulseek-downloads-heading">Downloads</h2><button id="soulseek-clear" type="button" disabled>Clear finished</button></div>
+        <ul class="files jobs"></ul>
+      </section>
+      <div id="soulseek-files" hidden>
+        <section id="soulseek-results" aria-labelledby="soulseek-results-heading" hidden>
+          <h2 id="soulseek-results-heading">Choose a file</h2>
+          <div class="files choices" role="radiogroup" aria-labelledby="soulseek-results-heading"></div>
+          <div class="settings-actions end"><button id="soulseek-download" type="button" disabled>Download</button></div>
+        </section>
+      </div>
+    </details>
+
+    <footer>Copy saved songs into the <strong>Tracks</strong> folder on your Clip+'s SD card.</footer>
     </section>
   </main>
   <script type="module" src="/src/main.js"></script>
+  <script type="module" src="/src/soulseek-ui.js"></script>
 </body>
 </html>
