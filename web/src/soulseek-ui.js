@@ -2,6 +2,10 @@ import { createPeerLookup, secureRelayURL } from './soulseek.js';
 
 const $ = (selector) => document.querySelector(selector);
 const loginForm = $('#soulseek-login');
+const relayURL = $('#relay-url');
+const relayAccess = $('#relay-access');
+const relayAccessLink = $('#relay-access-link');
+const relayURLKey = 'soulseekRelayURL';
 const session = $('#soulseek-session');
 const status = $('#soulseek-status');
 const submitButtons = document.querySelectorAll('#soulseek button[type="submit"]');
@@ -9,6 +13,33 @@ let currentAction;
 let protocol;
 let relay;
 let lookupPeer;
+
+function updateRelayAccess() {
+  try {
+    const healthURL = new URL('/healthz', secureRelayURL(relayURL.value));
+    healthURL.protocol = 'https:';
+    relayAccessLink.href = healthURL.href;
+    relayAccess.hidden = false;
+  } catch {
+    relayAccessLink.removeAttribute('href');
+    relayAccess.hidden = true;
+  }
+}
+
+try {
+  relayURL.value = localStorage.getItem(relayURLKey) || '';
+} catch { /* Storage can be disabled. */ }
+updateRelayAccess();
+relayURL.addEventListener('input', updateRelayAccess);
+relayURL.addEventListener('change', () => {
+  try {
+    if (relayURL.value) {
+      localStorage.setItem(relayURLKey, secureRelayURL(relayURL.value).href);
+    } else {
+      localStorage.removeItem(relayURLKey);
+    }
+  } catch { /* Invalid URLs and disabled storage cannot be saved. */ }
+});
 
 function disconnect() {
   relay?.close();
@@ -45,7 +76,7 @@ function submit(form, pending, action, failure) {
 submit(loginForm, 'Signing in…', async () => {
   let url;
   try {
-    url = secureRelayURL($('#relay-url').value);
+    url = secureRelayURL(relayURL.value);
   } catch {
     return 'Enter a wss:// relay URL. Put the relay token in its own field.';
   }
@@ -74,7 +105,7 @@ submit(loginForm, 'Signing in…', async () => {
   return 'Signed in to Soulseek.';
 }, () => {
   disconnect();
-  return 'Could not sign in. Check the relay URL, token, and allowed origin.';
+  return 'Could not sign in. Check the relay URL, token, and allowed origin. If your relay uses Cloudflare Access, sign in to the relay first.';
 });
 
 submit($('#soulseek-search'), 'Preparing search request…', async () => {
