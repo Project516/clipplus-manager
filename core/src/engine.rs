@@ -106,6 +106,8 @@ pub enum UiEvent {
     RockboxFailed(bool),
     /// Songs were copied to the card.
     SongsCopied,
+    /// This many added links were already in the list, so they were skipped.
+    LinksSkipped(usize),
     /// The firmware file waiting on the player: "", "bootloader" or "restore".
     FlashKind(&'static str),
     /// Stage of the running Rockbox job: idle, downloading, writing, ejecting,
@@ -807,6 +809,13 @@ impl Core {
         self.jobs.iter_mut().find(|j| j.id == id)
     }
 
+    /// A queued or finished job already has this link key.
+    fn listed(&self, key: &str) -> bool {
+        self.jobs
+            .iter()
+            .any(|j| j.blocks_repeat() && j.key().as_deref() == Some(key))
+    }
+
     fn show(&self, id: u64) {
         if let Some(job) = self.jobs.iter().find(|j| j.id == id) {
             (self.emit)(UiEvent::JobUpdate(job.into()));
@@ -1170,15 +1179,29 @@ impl Core {
                 }
             }
             Msg::AddLinks(links) => {
+                let mut skipped = 0;
                 for url in links {
+                    if self.listed(&queue::link_key(&url)) {
+                        skipped += 1;
+                        continue;
+                    }
                     let job = Job::new(self.next_id, url);
                     self.next_id += 1;
                     self.jobs.push(job);
+                }
+                if skipped > 0 {
+                    (self.emit)(UiEvent::LinksSkipped(skipped));
                 }
                 self.show_all();
             }
             Msg::Cancel(id) => self.cancel(id),
             Msg::Retry(id) => {
+                // The link may have been added again since this job stopped.
+                let key = self.jobs.iter().find(|j| j.id == id).and_then(Job::key);
+                if key.is_some_and(|k| self.listed(&k)) {
+                    (self.emit)(UiEvent::LinksSkipped(1));
+                    return;
+                }
                 if let Some(job) = self.job_mut(id).filter(|j| j.can_retry()) {
                     if let Some(source) = job.soulseek.as_mut() {
                         source.transfer = None;
@@ -1602,7 +1625,12 @@ impl Core {
             }
             Ok(Found::Playlist { entries }) => {
                 let playlist_url = self.jobs.remove(pos).url;
-                for (offset, entry) in entries.into_iter().enumerate() {
+                let (mut offset, mut skipped) = (0, 0);
+                for entry in entries {
+                    if self.listed(&queue::link_key(&entry.url)) {
+                        skipped += 1;
+                        continue;
+                    }
                     let mut job = Job::new(self.next_id, entry.url.clone());
                     self.next_id += 1;
                     job.title = entry.title;
@@ -1613,6 +1641,10 @@ impl Core {
                         job.playlist_index = entry.index;
                     }
                     self.jobs.insert(pos + offset, job);
+                    offset += 1;
+                }
+                if skipped > 0 {
+                    (self.emit)(UiEvent::LinksSkipped(skipped));
                 }
             }
         }
@@ -2963,6 +2995,78 @@ mod tests {
             events,
             _dir: dir,
         }
+    }
+
+    fn skipped(rig: &Rig) -> Vec<usize> {
+        let events = rig.events.lock().unwrap();
+        events
+            .iter()
+            .filter_map(|e| match e {
+                UiEvent::LinksSkipped(n) => Some(*n),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_link_already_in_the_list_is_skipped() {
+        let mut rig = rig();
+        let video = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        rig.core.handle(Msg::AddLinks(vec![
+            video.into(),
+            "https://youtu.be/dQw4w9WgXcQ".into(),
+            "https://a.example/x".into(),
+        ]));
+        assert_eq!(rig.core.jobs.len(), 2);
+        assert_eq!(skipped(&rig), [1]);
+
+        rig.core.jobs[0].stage = Stage::Copied;
+        rig.core
+            .handle(Msg::AddLinks(vec!["https://youtu.be/dQw4w9WgXcQ".into()]));
+        assert_eq!(rig.core.jobs.len(), 2);
+
+        rig.core.jobs[0].stage = Stage::Failed;
+        rig.core.handle(Msg::AddLinks(vec![video.into()]));
+        assert_eq!(rig.core.jobs.len(), 3);
+        assert_eq!(skipped(&rig), [1, 1]);
+
+        let failed = rig.core.jobs[0].id;
+        rig.core.handle(Msg::Retry(failed));
+        assert_eq!(rig.core.jobs[0].stage, Stage::Failed);
+        assert_eq!(skipped(&rig), [1, 1, 1]);
+    }
+
+    #[test]
+    fn playlist_items_already_in_the_list_are_skipped() {
+        let mut rig = rig();
+        rig.core.handle(Msg::AddLinks(vec![
+            "https://youtu.be/aaaaaaaaaaa".into(),
+            "https://www.youtube.com/playlist?list=PL1".into(),
+        ]));
+        let id = rig.core.jobs[1].id;
+        let entry = |v: &str, index| ytdlp::Entry {
+            url: format!("https://www.youtube.com/watch?v={v}"),
+            title: v.into(),
+            index,
+        };
+        rig.core.discovered(
+            id,
+            Ok(Found::Playlist {
+                entries: vec![
+                    entry("aaaaaaaaaaa", Some(1)),
+                    entry("bbbbbbbbbbb", Some(2)),
+                    entry("bbbbbbbbbbb", Some(3)),
+                    entry("ccccccccccc", Some(4)),
+                ],
+            }),
+        );
+        let items: Vec<_> = rig.core.jobs.iter().map(|j| j.title.as_str()).collect();
+        assert_eq!(
+            items,
+            ["https://youtu.be/aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"]
+        );
+        assert_eq!(rig.core.jobs[2].playlist_index, Some(4));
+        assert_eq!(skipped(&rig), [2]);
     }
 
     fn volume(mount: &str) -> CardInfo {

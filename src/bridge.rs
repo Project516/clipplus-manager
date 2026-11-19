@@ -127,6 +127,9 @@ pub mod qobject {
         fn album_queued(self: Pin<&mut Backend>);
 
         #[qsignal]
+        fn links_skipped(self: Pin<&mut Backend>, count: i32);
+
+        #[qsignal]
         fn raise_requested(self: Pin<&mut Backend>);
 
         #[qinvokable]
@@ -416,6 +419,9 @@ impl qobject::Backend {
             UiEvent::FlashKind(kind) => self.set_flash_kind(QString::from(kind)),
             UiEvent::RockboxFailed(failed) => self.set_rockbox_failed(failed),
             UiEvent::SongsCopied => self.set_songs_copied(true),
+            UiEvent::LinksSkipped(count) => {
+                self.links_skipped(i32::try_from(count).unwrap_or(i32::MAX));
+            }
             UiEvent::RockboxPhase(phase) => self.set_rockbox_phase(QString::from(phase)),
         }
     }
