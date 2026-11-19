@@ -22,6 +22,9 @@ pub struct Job {
     pub id: u64,
     /// What yt-dlp gets. A playlist item keeps the playlist link.
     pub url: String,
+    /// The link of this one video, which differs from `url` for a playlist item.
+    #[serde(default)]
+    pub link: String,
     pub title: String,
     pub playlist_index: Option<u32>,
     /// The link is known to be media, so a retry skips the search.
@@ -51,6 +54,7 @@ impl Job {
         Self {
             id,
             title: url.clone(),
+            link: url.clone(),
             url,
             playlist_index: None,
             found: false,
@@ -70,6 +74,26 @@ impl Job {
 
     pub fn is_finished(&self) -> bool {
         matches!(self.stage, Stage::Copied | Stage::Failed | Stage::Canceled)
+    }
+
+    /// Identity for spotting repeats. None for Soulseek jobs and for playlist
+    /// items saved without their own link.
+    pub fn key(&self) -> Option<String> {
+        if self.soulseek.is_some() {
+            return None;
+        }
+        if !self.link.is_empty() {
+            Some(link_key(&self.link))
+        } else if self.playlist_index.is_none() {
+            Some(link_key(&self.url))
+        } else {
+            None
+        }
+    }
+
+    /// A failed or canceled job does not block adding its link again.
+    pub fn blocks_repeat(&self) -> bool {
+        !matches!(self.stage, Stage::Failed | Stage::Canceled)
     }
 
     pub fn can_cancel(&self) -> bool {
@@ -174,6 +198,52 @@ pub fn parse_links(text: &str) -> Vec<String> {
     links
 }
 
+/// The YouTube video id, so every link form of one video matches, else the link itself.
+pub fn link_key(link: &str) -> String {
+    match youtube_id(link) {
+        Some(id) => format!("youtube:{id}"),
+        None => link.to_string(),
+    }
+}
+
+fn youtube_id(link: &str) -> Option<&str> {
+    let rest = link
+        .strip_prefix("https://")
+        .or_else(|| link.strip_prefix("http://"))?;
+    let split = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (host, rest) = rest.split_at(split);
+    let host = host.to_ascii_lowercase();
+    let host = ["www.", "m.", "music."]
+        .iter()
+        .find_map(|p| host.strip_prefix(p))
+        .unwrap_or(&host);
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let path = path.split('#').next().unwrap_or_default();
+    let mut params = query.split(['&', '#']);
+    // yt-dlp downloads the whole playlist for a link with a list.
+    if params.clone().any(|pair| pair.starts_with("list=")) {
+        return None;
+    }
+    let id = match host {
+        "youtu.be" => path.strip_prefix('/')?,
+        "youtube.com" | "youtube-nocookie.com" if path == "/watch" => {
+            params.find_map(|pair| pair.strip_prefix("v="))?
+        }
+        "youtube.com" | "youtube-nocookie.com" => ["/shorts/", "/live/", "/embed/", "/v/"]
+            .iter()
+            .find_map(|p| path.strip_prefix(p))?,
+        _ => return None,
+    };
+    let id = id.trim_end_matches('/');
+    // Embed pages that are not one video, with names of id length.
+    (id.len() == 11
+        && !matches!(id, "videoseries" | "live_stream")
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+    .then_some(id)
+}
+
 /// Jobs to keep across a restart, with work that was in flight set back to its start.
 pub fn restore(mut jobs: Vec<Job>) -> Vec<Job> {
     jobs.retain(|j| !matches!(j.stage, Stage::Copied | Stage::Canceled));
@@ -218,6 +288,50 @@ mod tests {
             ["https://a.example"]
         );
         assert!(parse_links("").is_empty());
+    }
+
+    #[test]
+    fn youtube_links_of_one_video_share_a_key() {
+        let key = "youtube:dQw4w9WgXcQ";
+        for link in [
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtube.com/watch?feature=share&v=dQw4w9WgXcQ&t=42",
+            "http://m.youtube.com/watch?v=dQw4w9WgXcQ#t=1",
+            "https://music.youtube.com/watch?v=dQw4w9WgXcQ&si=x",
+            "https://youtu.be/dQw4w9WgXcQ?si=abc",
+            "https://WWW.YouTube.com/shorts/dQw4w9WgXcQ",
+            "https://www.youtube.com/live/dQw4w9WgXcQ/",
+            "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+        ] {
+            assert_eq!(link_key(link), key, "{link}");
+        }
+    }
+
+    #[test]
+    fn other_links_key_on_the_whole_link() {
+        for link in [
+            "https://www.youtube.com/playlist?list=PL123",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123",
+            "https://youtu.be/dQw4w9WgXcQ?list=RDdQw4w9WgXcQ",
+            "https://www.youtube.com/embed/videoseries?si=x",
+            "https://www.youtube.com/embed/live_stream?channel=UC1",
+            "https://www.youtube.com/watch?v=short",
+            "https://notyoutube.com/watch?v=dQw4w9WgXcQ",
+            "https://a.example/x",
+        ] {
+            assert_eq!(link_key(link), link);
+        }
+    }
+
+    #[test]
+    fn playlist_items_key_on_their_own_link() {
+        let mut item = job(Stage::Waiting);
+        item.url = "https://www.youtube.com/playlist?list=PL123".into();
+        item.playlist_index = Some(2);
+        item.link = "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into();
+        assert_eq!(item.key().as_deref(), Some("youtube:dQw4w9WgXcQ"));
+        item.link.clear();
+        assert_eq!(item.key(), None);
     }
 
     fn job(stage: Stage) -> Job {

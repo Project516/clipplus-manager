@@ -83,6 +83,7 @@ Kirigami.ApplicationWindow {
             root.raise();
             root.requestActivate();
         }
+        onLinksSkipped: count => root.showPassiveNotification(count === 1 ? "Already in the list, skipped" : count + " links already in the list, skipped")
     }
 
     CardState {
