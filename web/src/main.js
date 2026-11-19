@@ -21,6 +21,7 @@ function openPanel(id) {
 }
 for (const link of document.querySelectorAll('nav a')) link.addEventListener('click', () => openPanel(link.hash.slice(1)));
 openPanel(location.hash.slice(1));
+addEventListener('hashchange', () => openPanel(location.hash.slice(1)));
 
 // fraction: undefined hides the bar, null shows it busy, 0 to 1 fills it.
 // Messages the user must act on show in full; song titles are clamped.
