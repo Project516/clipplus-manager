@@ -9,7 +9,7 @@ Kirigami.Page {
 
     required property Backend backend
 
-    // 0 picks a song on MusicBrainz, 1 picks a file on Soulseek.
+    // 0 picks a song or album on MusicBrainz, 1 picks a file or folder on Soulseek.
     property int step: 0
     property bool searched: false
     property string trackTitle: ""
@@ -30,16 +30,10 @@ Kirigami.Page {
     }
 
     function search() {
-        if (query.text.trim() === "" || (albumMode && !backend.soulseekReady))
+        if (query.text.trim() === "")
             return;
-        searched = query.text.trim() !== "";
-        if (albumMode) {
-            trackTitle = query.text.trim();
-            backend.searchAlbums(trackTitle);
-            step = 1;
-        } else {
-            backend.searchMusic(query.text);
-        }
+        searched = true;
+        backend.searchMusic(query.text, albumMode);
     }
 
     title: step === 0 ? "Find music" : (albumMode ? "Choose an album folder" : "Choose a file")
@@ -81,7 +75,11 @@ Kirigami.Page {
             Controls.ComboBox {
                 model: ["Song", "Album"]
                 Accessible.name: "Search for"
-                onCurrentIndexChanged: page.albumMode = currentIndex === 1
+                onCurrentIndexChanged: {
+                    page.albumMode = currentIndex === 1;
+                    page.searched = false;
+                    page.backend.searchMusic("", page.albumMode);
+                }
             }
 
             RowLayout {
@@ -99,7 +97,7 @@ Kirigami.Page {
                     text: "Search"
                     icon.name: "search"
                     highlighted: enabled
-                    enabled: query.text.trim() !== "" && (!page.albumMode || page.backend.soulseekReady)
+                    enabled: query.text.trim() !== ""
                     onClicked: page.search()
                 }
             }
@@ -134,15 +132,15 @@ Kirigami.Page {
 
             Kirigami.InlineMessage {
                 Layout.fillWidth: true
-                visible: !page.albumMode && page.backend.searchError !== ""
+                visible: page.backend.searchError !== ""
                 text: page.backend.searchError
                 type: Kirigami.MessageType.Error
             }
 
             Kirigami.Heading {
                 level: 4
-                text: "Choose a song"
-                visible: !page.albumMode && songs.count > 0
+                text: page.albumMode ? "Choose an album" : "Choose a song"
+                visible: songs.count > 0
             }
 
             ListView {
@@ -153,7 +151,7 @@ Kirigami.Page {
                 currentIndex: -1
                 keyNavigationEnabled: true
                 activeFocusOnTab: true
-                model: page.albumMode || page.backend.searchResults === "" ? [] : JSON.parse(page.backend.searchResults)
+                model: page.backend.searchResults === "" ? [] : JSON.parse(page.backend.searchResults)
                 Controls.ScrollBar.vertical: Controls.ScrollBar {}
                 delegate: Controls.ItemDelegate {
                     required property var modelData
@@ -171,7 +169,11 @@ Kirigami.Page {
                         }
                         Controls.Label {
                             Layout.fillWidth: true
-                            text: modelData.artist + (modelData.release ? " · " + modelData.release : "") + (modelData.length ? " · " + page.duration(modelData.length) : "")
+                            text: {
+                                if ("tracks" in modelData)
+                                    return [modelData.artist, modelData.year, modelData.tracks ? modelData.tracks + (modelData.tracks === 1 ? " song" : " songs") : ""].filter(Boolean).join(" · ");
+                                return modelData.artist + (modelData.release ? " · " + modelData.release : "") + (modelData.length ? " · " + page.duration(modelData.length) : "");
+                            }
                             textFormat: Text.PlainText
                             elide: Text.ElideRight
                             color: Kirigami.Theme.disabledTextColor
@@ -182,16 +184,16 @@ Kirigami.Page {
 
                 Controls.BusyIndicator {
                     anchors.centerIn: parent
-                    running: !page.albumMode && page.backend.searching
+                    running: page.backend.searching
                     visible: running
                 }
                 Kirigami.PlaceholderMessage {
                     anchors.centerIn: parent
                     width: parent.width - Kirigami.Units.gridUnit * 4
-                    visible: page.albumMode || (!page.backend.searching && page.backend.searchError === "" && songs.count === 0)
+                    visible: !page.backend.searching && page.backend.searchError === "" && songs.count === 0
                     icon.name: "search"
-                    text: page.albumMode ? "Search Soulseek for an album" : (page.searched ? "No recordings found" : "Search MusicBrainz for a song")
-                    explanation: page.albumMode ? "Choose a folder to download its songs." : (page.searched ? "" : "Then pick a file from Soulseek. It is saved as mp3 and copied to your Sansa.")
+                    text: page.searched ? (page.albumMode ? "No albums found" : "No recordings found") : (page.albumMode ? "Search MusicBrainz for an album" : "Search MusicBrainz for a song")
+                    explanation: page.searched ? "" : (page.albumMode ? "Then pick a folder from Soulseek. Its songs are copied to your Sansa." : "Then pick a file from Soulseek. It is saved as mp3 and copied to your Sansa.")
                 }
             }
 
@@ -200,12 +202,14 @@ Kirigami.Page {
                 text: "Find downloads"
                 icon.name: "go-next"
                 highlighted: enabled
-                visible: !page.albumMode
                 enabled: page.backend.soulseekReady && songs.currentIndex >= 0 && !page.backend.searching
                 onClicked: {
                     const selected = songs.model[songs.currentIndex];
                     page.trackTitle = selected.artist + " · " + selected.title;
-                    page.backend.findPeers(songs.currentIndex);
+                    if (page.albumMode)
+                        page.backend.searchAlbums(songs.currentIndex);
+                    else
+                        page.backend.findPeers(songs.currentIndex);
                     page.step = 1;
                 }
             }
@@ -258,7 +262,7 @@ Kirigami.Page {
                             text: {
                                 const peer = modelData.username + " · " + (modelData.free_slot ? "free slot" : "queue " + modelData.queue_length);
                                 if (page.albumMode)
-                                    return peer;
+                                    return peer + " · " + modelData.size + (modelData.size === 1 ? " song" : " songs");
                                 return peer + " · " + (modelData.size / 1000000).toFixed(1) + " MB" + (modelData.bitrate ? " · " + modelData.bitrate + " kbps" : "") + (modelData.length ? " · " + page.duration(modelData.length * 1000) : "");
                             }
                             textFormat: Text.PlainText

@@ -4,7 +4,7 @@
 use crate::bootloader;
 use crate::card::{CardInfo, Udisks, Volumes};
 use crate::drive::Drive;
-use crate::musicbrainz::Recording;
+use crate::musicbrainz::{Album, Recording};
 use crate::paths::{Config, Dirs, State, now_secs, read_json, read_json_checked, write_json};
 use crate::player::{self, Firmware, PlayerState};
 use crate::proc::{self, Cancel};
@@ -132,7 +132,7 @@ enum Msg {
     SoulseekStarted(Result<Arc<Slskd>, String>),
     SoulseekExited(Arc<Slskd>),
     SearchPeers(Recording),
-    SearchAlbums(String),
+    SearchAlbums(Album),
     CancelAlbumSearch,
     AlbumFound(u64, Result<Vec<PeerFile>, String>),
     DownloadAlbum(usize, bool),
@@ -305,8 +305,8 @@ impl Engine {
     pub fn search_peers(&self, recording: Recording) {
         let _ = self.tx.send(Msg::SearchPeers(recording));
     }
-    pub fn search_albums(&self, query: String) {
-        let _ = self.tx.send(Msg::SearchAlbums(query));
+    pub fn search_albums(&self, album: Album) {
+        let _ = self.tx.send(Msg::SearchAlbums(album));
     }
     pub fn cancel_album_search(&self) {
         let _ = self.tx.send(Msg::CancelAlbumSearch);
@@ -1019,7 +1019,7 @@ impl Core {
                 self.album_browsing = false;
                 (self.emit)(UiEvent::PeerSearching(false));
             }
-            Msg::SearchAlbums(query) => {
+            Msg::SearchAlbums(album) => {
                 self.album_browsing = false;
                 self.peer_generation += 1;
                 let generation = self.peer_generation;
@@ -1035,7 +1035,12 @@ impl Core {
                 (self.emit)(UiEvent::PeerSearching(true));
                 let tx = self.tx.clone();
                 spawn("soulseek-album-search", move || {
-                    let result = client.search(&query).map(crate::slskd::album_candidates);
+                    let query = format!("{} {}", album.artist, album.title);
+                    let result = client.search(&query).map(|files| {
+                        let mut folders = crate::slskd::album_candidates(files);
+                        crate::slskd::rank_album_folders(&mut folders, &album);
+                        folders
+                    });
                     let _ = tx.send(Msg::AlbumFound(generation, result));
                 });
             }

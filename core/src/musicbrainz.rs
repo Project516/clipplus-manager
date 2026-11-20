@@ -289,7 +289,8 @@ fn rank_albums(releases: Vec<Release>, query: &str) -> Vec<Album> {
             .map(str::to_string);
         if let Some(entry) = found.iter_mut().find(|entry| entry.album.id == group.id) {
             let album = &mut entry.album;
-            if release.track_count > 0 && (album.tracks == 0 || release.track_count < album.tracks) {
+            if release.track_count > 0 && (album.tracks == 0 || release.track_count < album.tracks)
+            {
                 album.tracks = release.track_count;
             }
             if year.is_some() && (album.year.is_none() || year < album.year) {
@@ -478,7 +479,14 @@ mod tests {
         assert!(search_albums(" & ").unwrap().is_empty());
     }
 
-    fn edition(group: &str, title: &str, artist: &str, kind: &str, date: &str, tracks: u32) -> Value {
+    fn edition(
+        group: &str,
+        title: &str,
+        artist: &str,
+        kind: &str,
+        date: &str,
+        tracks: u32,
+    ) -> Value {
         let (primary, secondary) = kind.split_once('+').unwrap_or((kind, ""));
         let secondary: Vec<&str> = secondary.split('+').filter(|t| !t.is_empty()).collect();
         json!({"title": title, "date": date, "score": 100, "track-count": tracks,
@@ -646,9 +654,11 @@ mod tests {
     fn gives_up_after_one_retry() {
         let (endpoint, server) = serve(vec![BUSY.to_string(), BUSY.to_string()]);
         let agent = crate::net::agent();
-        let error = with_retry(Duration::ZERO, || {}, || {
-            search_at(&agent, &endpoint, "band song")
-        })
+        let error = with_retry(
+            Duration::ZERO,
+            || {},
+            || search_at(&agent, &endpoint, "band song"),
+        )
         .unwrap_err();
         assert_eq!(server.join().unwrap().len(), 2);
         assert!(error.to_string().contains("busy"));

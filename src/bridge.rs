@@ -136,7 +136,7 @@ pub mod qobject {
         fn add_links(self: &Backend, text: &QString);
 
         #[qinvokable]
-        fn search_music(self: Pin<&mut Backend>, query: &QString);
+        fn search_music(self: Pin<&mut Backend>, query: &QString, albums: bool);
 
         #[qinvokable]
         fn soulseek_connect(self: &Backend);
@@ -151,7 +151,7 @@ pub mod qobject {
         fn find_peers(self: Pin<&mut Backend>, index: i32);
 
         #[qinvokable]
-        fn search_albums(self: Pin<&mut Backend>, query: &QString);
+        fn search_albums(self: Pin<&mut Backend>, index: i32);
 
         #[qinvokable]
         fn cancel_album_search(self: &Backend);
@@ -302,6 +302,7 @@ pub struct BackendRust {
     searching: bool,
     search_generation: u64,
     music_rows: Vec<clipplus_manager_core::musicbrainz::Recording>,
+    album_rows: Vec<clipplus_manager_core::musicbrainz::Album>,
     soulseek_ready: bool,
     soulseek_status: QString,
     peer_results: QString,
@@ -548,13 +549,14 @@ impl qobject::Backend {
         }
     }
 
-    fn search_music(mut self: Pin<&mut Self>, query: &QString) {
+    fn search_music(mut self: Pin<&mut Self>, query: &QString, albums: bool) {
         let query = query.to_string();
         let generation = self.rust().search_generation.wrapping_add(1);
         self.as_mut().rust_mut().search_generation = generation;
         self.as_mut().set_search_error(QString::default());
         self.as_mut().set_search_results(QString::from("[]"));
         self.as_mut().rust_mut().music_rows.clear();
+        self.as_mut().rust_mut().album_rows.clear();
         if query.trim().is_empty() {
             self.set_searching(false);
             return;
@@ -562,24 +564,43 @@ impl qobject::Backend {
         self.as_mut().set_searching(true);
         let qt = self.qt_thread();
         std::thread::spawn(move || {
-            let result = clipplus_manager_core::musicbrainz::search(&query);
+            use clipplus_manager_core::musicbrainz;
+            let result = if albums {
+                musicbrainz::search_albums(&query).map(|rows| {
+                    let values = rows
+                        .iter()
+                        .map(|a| {
+                            serde_json::json!({
+                                "id": a.id, "title": a.title, "artist": a.artist,
+                                "year": a.year, "tracks": a.tracks
+                            })
+                        })
+                        .collect();
+                    (Vec::new(), rows, values)
+                })
+            } else {
+                musicbrainz::search(&query).map(|rows| {
+                    let values = rows
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "id": r.id, "title": r.title, "artist": r.artist,
+                                "release": r.release, "length": r.length_ms
+                            })
+                        })
+                        .collect();
+                    (rows, Vec::new(), values)
+                })
+            };
             let _ = qt.queue(move |mut backend| {
                 if backend.rust().search_generation != generation {
                     return;
                 }
                 backend.as_mut().set_searching(false);
                 match result {
-                    Ok(rows) => {
-                        let values: Vec<_> = rows
-                            .iter()
-                            .map(|r| {
-                                serde_json::json!({
-                                    "id": r.id, "title": r.title, "artist": r.artist,
-                                    "release": r.release, "length": r.length_ms
-                                })
-                            })
-                            .collect();
-                        backend.as_mut().rust_mut().music_rows = rows;
+                    Ok((music, albums, values)) => {
+                        backend.as_mut().rust_mut().music_rows = music;
+                        backend.as_mut().rust_mut().album_rows = albums;
                         backend.set_search_results(QString::from(
                             &serde_json::Value::Array(values).to_string(),
                         ));
@@ -619,12 +640,16 @@ impl qobject::Backend {
         }
     }
 
-    fn search_albums(mut self: Pin<&mut Self>, query: &QString) {
-        if let Some(engine) = self.engine().cloned() {
+    fn search_albums(mut self: Pin<&mut Self>, index: i32) {
+        let album = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.rust().album_rows.get(i))
+            .cloned();
+        if let (Some(album), Some(engine)) = (album, self.engine().cloned()) {
             self.as_mut().set_peer_error(QString::default());
             self.as_mut().set_peer_results(QString::from("[]"));
             self.as_mut().set_peer_searching(true);
-            engine.search_albums(query.to_string());
+            engine.search_albums(album);
         }
     }
 
