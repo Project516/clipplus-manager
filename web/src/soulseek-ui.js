@@ -1,10 +1,10 @@
 import { createJobs, element } from './dom.js';
 import { FFmpeg, ffmpegCore } from './ffmpeg.js';
 import { fixForSansa } from './fixer.js';
-import { recordingDetails, searchRecordings } from './musicbrainz.js';
+import { recordingDetails, releaseDetails, searchAlbums, searchRecordings } from './musicbrainz.js';
 import { safeName } from './output.js';
 import {
-  PLAYABLE, RESULT_LIMIT, addResult, albumDetails, albumRank, albumKey, baseName, describeProgress, fileDetails, fileKey,
+  PLAYABLE, RESULT_LIMIT, addResult, albumDetails, albumFolderRank, albumKey, baseName, describeProgress, fileDetails, fileKey,
   formatSize, groupAlbumFiles, newAccount, parentFolder, plural, secureRelayURL,
 } from './soulseek.js';
 import { uniqueName, zipStored } from './zip.js';
@@ -35,6 +35,7 @@ const peerMeter = $('#soulseek-peer-searching');
 const pick = $('#soulseek-pick');
 const songsSection = $('#soulseek-songs');
 const songChoices = songsSection.querySelector('.choices');
+const songsHeading = $('#soulseek-songs-heading');
 const findButton = $('#soulseek-find');
 const empty = $('#soulseek-empty');
 const results = $('#soulseek-results');
@@ -48,7 +49,7 @@ const addJob = createJobs($('#soulseek-downloads'), $('#soulseek-clear'));
 
 const hints = {
   song: ['Search MusicBrainz for a song', 'Then pick a file from Soulseek. It is fixed for your Sansa before you save it.'],
-  album: ['Search Soulseek for an album', 'Choose a folder. Its songs are fixed for your Sansa and saved as one .zip.'],
+  album: ['Search MusicBrainz for an album', 'Then pick a folder from Soulseek. Its songs are fixed for your Sansa and saved as one .zip.'],
 };
 
 let client;
@@ -215,6 +216,7 @@ function showEmpty(title, text = '') {
 function renderSongs() {
   selectedSong = undefined;
   findButton.disabled = true;
+  songsHeading.textContent = mode.value === 'album' ? 'Choose an album' : 'Choose a song';
   songChoices.replaceChildren(...songs.map(songItem));
   songsSection.hidden = !songs.length;
   empty.hidden = songs.length > 0;
@@ -276,8 +278,8 @@ function songItem(song) {
   const item = radioItem('soulseek-song', () => {
     selectedSong = song;
     findButton.disabled = !client;
-  }, choiceText(song.title, '', recordingDetails(song)));
-  item.addEventListener('dblclick', () => findFiles(song));
+  }, choiceText(song.title, '', 'tracks' in song ? releaseDetails(song) : recordingDetails(song)));
+  item.addEventListener('dblclick', () => findChoice(song));
   return item;
 }
 
@@ -528,14 +530,16 @@ function findFiles(song) {
   });
 }
 
-function findAlbums(text) {
+function findAlbums(album) {
+  if (!client) return;
   const groups = new Map();
+  const rank = albumFolderRank(album);
   fileSong = undefined;
   return searchSoulseek({
-    text,
+    text: `${album.artist} ${album.title}`,
     heading: 'Choose an album folder',
-    trackText: text,
-    add: (result) => { rows = [...groupAlbumFiles(groups, result).values()].sort(albumRank); },
+    trackText: `${album.artist} · ${album.title}`,
+    add: (result) => { rows = [...groupAlbumFiles(groups, result).values()].sort(rank); },
     summary: () => {
       if (!rows.length) return 'No album folders found. Try other words.';
       if (rows.length === RESULT_LIMIT) return `Showing the first ${RESULT_LIMIT} album folders.`;
@@ -544,7 +548,10 @@ function findAlbums(text) {
   });
 }
 
+const findChoice = (choice) => ('tracks' in choice ? findAlbums(choice) : findFiles(choice));
+
 async function findSongs(text) {
+  const album = mode.value === 'album';
   const controller = startSearch();
   songs = [];
   renderSongs();
@@ -553,7 +560,7 @@ async function findSongs(text) {
   searchButton.disabled = true;
   status.textContent = 'Searching MusicBrainz…';
   try {
-    songs = await searchRecordings(text, { signal: controller.signal });
+    songs = await (album ? searchAlbums : searchRecordings)(text, { signal: controller.signal });
   } catch (error) {
     if (search === controller) status.textContent = error.message;
     return;
@@ -563,9 +570,9 @@ async function findSongs(text) {
   if (controller.signal.aborted) return;
   renderSongs();
   if (songs.length) {
-    status.textContent = `Found ${plural(songs.length, 'recording')}.`;
+    status.textContent = `Found ${plural(songs.length, album ? 'album' : 'recording')}.`;
   } else {
-    showEmpty('No recordings found');
+    showEmpty(album ? 'No albums found' : 'No recordings found');
     status.textContent = '';
   }
 }
@@ -576,7 +583,7 @@ backButton.addEventListener('click', () => {
 });
 mode.addEventListener('change', resetFind);
 findButton.addEventListener('click', () => {
-  if (selectedSong) findFiles(selectedSong);
+  if (selectedSong) findChoice(selectedSong);
 });
 downloadButton.addEventListener('click', () => {
   if (selected) startDownload(selected);
@@ -636,8 +643,7 @@ searchForm.addEventListener('submit', (event) => {
   event.preventDefault();
   const text = query.value.trim();
   if (!client || !text) return;
-  if (mode.value === 'album') findAlbums(text);
-  else findSongs(text);
+  findSongs(text);
 });
 
 $('#soulseek-disconnect').addEventListener('click', () => signOut('Disconnected.'));

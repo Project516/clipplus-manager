@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { addResult, albumDetails, albumRank, baseName, describeProgress, fileDetails, formatDuration, formatSize, groupAlbumFiles, newAccount, parentFolder, plural, secureRelayURL } from './soulseek.js';
+import { addResult, albumDetails, albumFolderRank, albumRank, baseName, describeProgress, fileDetails, formatDuration, formatSize, groupAlbumFiles, newAccount, parentFolder, plural, secureRelayURL } from './soulseek.js';
 
 test('makes an account shaped like the desktop one', () => {
   const account = newAccount();
@@ -100,4 +100,14 @@ test('describes files and progress for the panel', () => {
   assert.deepEqual(describeProgress({ state: 'queued' }), { text: 'Queued by the user', fraction: null });
   assert.deepEqual(describeProgress({ state: 'transferring', received: 1, total: 4e6 }), { text: '0% of 4.0 MB', fraction: 1 / 4e6 });
   assert.deepEqual(describeProgress({ state: 'transferring', received: 3e6, total: 4e6 }), { text: '75% of 4.0 MB', fraction: 0.75 });
+});
+
+test('ranks album folders named for the album with every song first', () => {
+  const groups = new Map();
+  const add = (username, freeSlot, ...paths) => groupAlbumFiles(groups, { ...found(username, ...paths), freeSlot, queueLength: freeSlot ? 0 : 3 });
+  add('single', true, 'Band\\Tidewater\\01.flac');
+  add('other', true, 'Band\\Low Tide\\01.mp3', 'Band\\Low Tide\\02.mp3', 'Band\\Low Tide\\03.mp3');
+  add('full', false, 'Band\\2019 - Tidewater (Deluxe)\\01.mp3', 'Band\\2019 - Tidewater (Deluxe)\\02.mp3', 'Band\\2019 - Tidewater (Deluxe)\\03.mp3');
+  const order = [...groups.values()].sort(albumFolderRank({ title: 'Tidewater', tracks: 3 })).map((group) => group.username);
+  assert.deepEqual(order, ['full', 'single', 'other']);
 });
