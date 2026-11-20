@@ -1,4 +1,4 @@
-//! Recording search using the MusicBrainz web service.
+//! Recording and album search using the MusicBrainz web service.
 
 use serde::Deserialize;
 use std::cmp::Reverse;
@@ -6,7 +6,8 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const ENDPOINT: &str = "https://musicbrainz.org/ws/2/recording/";
+const RECORDINGS: &str = "https://musicbrainz.org/ws/2/recording/";
+const RELEASES: &str = "https://musicbrainz.org/ws/2/release/";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recording {
@@ -17,10 +18,25 @@ pub struct Recording {
     pub length_ms: Option<u64>,
 }
 
+/// One release group, such as a studio album and all its editions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Album {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub year: Option<String>,
+    /// Songs on the shortest edition, 0 when unknown.
+    pub tracks: u32,
+}
+
 #[derive(Deserialize)]
 struct Results {
     recordings: Option<Vec<MusicBrainzRecording>>,
-    error: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct ReleaseResults {
+    releases: Option<Vec<Release>>,
 }
 
 #[derive(Deserialize)]
@@ -50,10 +66,19 @@ struct Release {
     date: Option<String>,
     #[serde(rename = "release-group")]
     group: Option<ReleaseGroup>,
+    #[serde(default)]
+    score: u32,
+    #[serde(rename = "track-count", default)]
+    track_count: u32,
+    #[serde(rename = "artist-credit", default)]
+    artist_credit: Vec<ArtistCredit>,
 }
 
 #[derive(Deserialize)]
 struct ReleaseGroup {
+    #[serde(default)]
+    id: String,
+    title: Option<String>,
     #[serde(rename = "primary-type")]
     primary: Option<String>,
     #[serde(rename = "secondary-types", default)]
@@ -84,8 +109,27 @@ impl Release {
     }
 }
 
+impl ReleaseGroup {
+    /// Lower is better: studio albums, EPs, other albums, then singles and the rest.
+    fn kind(&self) -> u8 {
+        match self.primary.as_deref() {
+            Some("Album") if self.secondary.iter().all(|t| t == "Soundtrack") => 0,
+            Some("EP") => 1,
+            Some("Album") => 2,
+            _ => 3,
+        }
+    }
+}
+
+fn credit(credits: &[ArtistCredit]) -> String {
+    credits
+        .iter()
+        .map(|credit| format!("{}{}", credit.name, credit.joinphrase))
+        .collect()
+}
+
 /// Lowercase words made of letters, digits and apostrophes.
-fn words(text: &str) -> Vec<String> {
+pub(crate) fn words(text: &str) -> Vec<String> {
     text.to_lowercase()
         .replace('\u{2019}', "'")
         .split(|c: char| !(c.is_alphanumeric() || c == '\''))
@@ -99,13 +143,22 @@ pub fn search(query: &str) -> Result<Vec<Recording>, String> {
     if words(query).is_empty() {
         return Ok(Vec::new());
     }
-    search_with_retry(
-        &crate::net::agent(),
-        ENDPOINT,
-        query,
-        Duration::from_secs(2),
-        pace,
-    )
+    let agent = crate::net::agent();
+    with_retry(Duration::from_secs(2), pace, || {
+        search_at(&agent, RECORDINGS, query)
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// Search albums. Call from a worker thread, like `search`.
+pub fn search_albums(query: &str) -> Result<Vec<Album>, String> {
+    if words(query).is_empty() {
+        return Ok(Vec::new());
+    }
+    let agent = crate::net::agent();
+    with_retry(Duration::from_secs(2), pace, || {
+        albums_at(&agent, RELEASES, query)
+    })
     .map_err(|e| e.to_string())
 }
 
@@ -123,19 +176,17 @@ fn pace() {
 }
 
 // `pace` runs before every attempt, so a retry also counts against the limit.
-fn search_with_retry(
-    agent: &ureq::Agent,
-    endpoint: &str,
-    query: &str,
+fn with_retry<T>(
     delay: Duration,
     pace: fn(),
-) -> Result<Vec<Recording>, SearchError> {
+    attempt: impl Fn() -> Result<T, SearchError>,
+) -> Result<T, SearchError> {
     pace();
-    match search_at(agent, endpoint, query) {
+    match attempt() {
         Err(SearchError::Busy) => {
             std::thread::sleep(delay);
             pace();
-            search_at(agent, endpoint, query)
+            attempt()
         }
         other => other,
     }
@@ -156,11 +207,11 @@ impl std::fmt::Display for SearchError {
     }
 }
 
-fn search_at(
+fn request(
     agent: &ureq::Agent,
     endpoint: &str,
     query: &str,
-) -> Result<Vec<Recording>, SearchError> {
+) -> Result<serde_json::Value, SearchError> {
     let text = query.split_whitespace().collect::<Vec<_>>().join(" ");
     let body = agent
         .get(endpoint)
@@ -176,7 +227,7 @@ fn search_at(
         .query("query", text)
         .query("dismax", "true")
         .query("fmt", "json")
-        // Each song repeats once per release, so ask for more than we show.
+        // Each song or album repeats once per release, so ask for more than we show.
         .query("limit", "100")
         .call()
         .map_err(|e| match e {
@@ -187,16 +238,104 @@ fn search_at(
         .body_mut()
         .read_to_string()
         .map_err(|e| SearchError::Other(format!("MusicBrainz response: {e}")))?;
-    let results: Results = serde_json::from_str(&body)
+    let value: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| SearchError::Other(format!("MusicBrainz response: {e}")))?;
     // Overload can also come as a 200 with an error body.
-    if results.error.is_some() {
+    if value.get("error").is_some() {
         return Err(SearchError::Busy);
     }
+    Ok(value)
+}
+
+fn search_at(
+    agent: &ureq::Agent,
+    endpoint: &str,
+    query: &str,
+) -> Result<Vec<Recording>, SearchError> {
+    let results: Results = serde_json::from_value(request(agent, endpoint, query)?)
+        .map_err(|e| SearchError::Other(format!("MusicBrainz response: {e}")))?;
     let recordings = results
         .recordings
         .ok_or_else(|| SearchError::Other("MusicBrainz response: no recordings".into()))?;
     Ok(rank(recordings, query))
+}
+
+fn albums_at(agent: &ureq::Agent, endpoint: &str, query: &str) -> Result<Vec<Album>, SearchError> {
+    let results: ReleaseResults = serde_json::from_value(request(agent, endpoint, query)?)
+        .map_err(|e| SearchError::Other(format!("MusicBrainz response: {e}")))?;
+    let releases = results
+        .releases
+        .ok_or_else(|| SearchError::Other("MusicBrainz response: no releases".into()))?;
+    Ok(rank_albums(releases, query))
+}
+
+/// One row per release group. Albums with every query word come first, then studio albums.
+fn rank_albums(releases: Vec<Release>, query: &str) -> Vec<Album> {
+    struct Found {
+        album: Album,
+        kind: u8,
+        score: u32,
+        releases: usize,
+    }
+    let mut found: Vec<Found> = Vec::new();
+    for release in releases {
+        let Some(group) = release.group.filter(|group| !group.id.is_empty()) else {
+            continue;
+        };
+        let year = release
+            .date
+            .as_deref()
+            .and_then(|date| date.get(..4))
+            .map(str::to_string);
+        if let Some(entry) = found.iter_mut().find(|entry| entry.album.id == group.id) {
+            let album = &mut entry.album;
+            if release.track_count > 0 && (album.tracks == 0 || release.track_count < album.tracks) {
+                album.tracks = release.track_count;
+            }
+            if year.is_some() && (album.year.is_none() || year < album.year) {
+                album.year = year;
+            }
+            entry.score = entry.score.max(release.score);
+            entry.releases += 1;
+            continue;
+        }
+        found.push(Found {
+            kind: group.kind(),
+            album: Album {
+                title: group.title.unwrap_or(release.title),
+                id: group.id,
+                artist: credit(&release.artist_credit),
+                year,
+                tracks: release.track_count,
+            },
+            score: release.score,
+            releases: 1,
+        });
+    }
+    let wanted: HashSet<String> = words(query).into_iter().collect();
+    let mut ranked: Vec<_> = found
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let have: HashSet<String> =
+                words(&format!("{} {}", entry.album.artist, entry.album.title))
+                    .into_iter()
+                    .collect();
+            let missing = wanted.difference(&have).count();
+            let extra = have.difference(&wanted).count();
+            let key = (
+                missing,
+                entry.kind,
+                extra,
+                Reverse(entry.score),
+                Reverse(entry.releases),
+                index,
+            );
+            (key, entry.album)
+        })
+        .collect();
+    ranked.sort_by_key(|(key, _)| *key);
+    ranked.into_iter().map(|(_, album)| album).collect()
 }
 
 /// Closest match to the query first, one row per song.
@@ -206,11 +345,7 @@ fn rank(recordings: Vec<MusicBrainzRecording>, query: &str) -> Vec<Recording> {
         .into_iter()
         .enumerate()
         .map(|(index, recording)| {
-            let artist: String = recording
-                .artist_credit
-                .iter()
-                .map(|credit| format!("{}{}", credit.name, credit.joinphrase))
-                .collect();
+            let artist = credit(&recording.artist_credit);
             let extra = words(&format!("{artist} {}", recording.title))
                 .into_iter()
                 .collect::<HashSet<_>>()
@@ -340,6 +475,47 @@ mod tests {
     fn empty_query_does_not_search() {
         assert!(search("  ").unwrap().is_empty());
         assert!(search(" & - ").unwrap().is_empty());
+        assert!(search_albums(" & ").unwrap().is_empty());
+    }
+
+    fn edition(group: &str, title: &str, artist: &str, kind: &str, date: &str, tracks: u32) -> Value {
+        let (primary, secondary) = kind.split_once('+').unwrap_or((kind, ""));
+        let secondary: Vec<&str> = secondary.split('+').filter(|t| !t.is_empty()).collect();
+        json!({"title": title, "date": date, "score": 100, "track-count": tracks,
+            "artist-credit": [{"name": artist}],
+            "release-group": {"id": group, "title": title, "primary-type": primary, "secondary-types": secondary}})
+    }
+
+    // web/src/musicbrainz.test.js checks the same order.
+    #[test]
+    fn groups_album_editions_and_ranks_studio_albums_first() {
+        let body = json!({"releases": [
+            edition("live", "Glass Harbor Live", "Glass Harbor", "Album+Live", "2021", 20),
+            edition("single", "Tidewater", "Glass Harbor", "Single", "2018-05", 1),
+            edition("tribute", "Tidewater", "Salt Choir", "Album", "2015", 9),
+            edition("ep", "Low Tide", "Glass Harbor", "EP", "2016", 4),
+            edition("album", "Tidewater", "Glass Harbor", "Album", "2019-03-01", 14),
+            edition("album", "Tidewater (deluxe)", "Glass Harbor", "Album", "2018-11-02", 12),
+            edition("album", "Tidewater", "Glass Harbor", "Album", "", 0),
+            {"title": "No group", "artist-credit": [{"name": "Glass Harbor"}]},
+        ]})
+        .to_string();
+        let (endpoint, server) = serve(vec![ok(&body)]);
+        let albums = albums_at(&crate::net::agent(), &endpoint, "glass harbor").unwrap();
+        let request = &server.join().unwrap()[0];
+        assert!(request.contains("query=glass%20harbor") && request.contains("dismax=true"));
+        let ids: Vec<_> = albums.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["album", "ep", "live", "single", "tribute"]);
+        assert_eq!(
+            albums[0],
+            Album {
+                id: "album".into(),
+                title: "Tidewater".into(),
+                artist: "Glass Harbor".into(),
+                year: Some("2018".into()),
+                tracks: 12,
+            }
+        );
     }
 
     #[test]
@@ -454,13 +630,10 @@ mod tests {
         for busy in [BUSY.to_string(), busy_body] {
             let (endpoint, server) = serve(vec![busy, ok(&body)]);
             let before = PACED.load(Ordering::SeqCst);
-            let results = search_with_retry(
-                &crate::net::agent(),
-                &endpoint,
-                "band song",
-                Duration::ZERO,
-                count,
-            )
+            let agent = crate::net::agent();
+            let results = with_retry(Duration::ZERO, count, || {
+                search_at(&agent, &endpoint, "band song")
+            })
             .unwrap();
             assert_eq!(server.join().unwrap().len(), 2);
             assert_eq!(results.len(), 1);
@@ -472,13 +645,10 @@ mod tests {
     #[test]
     fn gives_up_after_one_retry() {
         let (endpoint, server) = serve(vec![BUSY.to_string(), BUSY.to_string()]);
-        let error = search_with_retry(
-            &crate::net::agent(),
-            &endpoint,
-            "band song",
-            Duration::ZERO,
-            || {},
-        )
+        let agent = crate::net::agent();
+        let error = with_retry(Duration::ZERO, || {}, || {
+            search_at(&agent, &endpoint, "band song")
+        })
         .unwrap_err();
         assert_eq!(server.join().unwrap().len(), 2);
         assert!(error.to_string().contains("busy"));
