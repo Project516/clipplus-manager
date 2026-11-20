@@ -5,6 +5,11 @@ import { chromium } from 'playwright-core';
 import { preview } from 'vite';
 
 const musicbrainz = await readFile(new URL('../test-fixtures/musicbrainz.json', import.meta.url), 'utf8');
+const edition = (id, type, date, tracks) => ({
+  title: 'Tidewater', date, score: 100, 'track-count': tracks, 'artist-credit': [{ name: 'The Glass Harbor' }],
+  'release-group': { id, title: 'Tidewater', 'primary-type': type },
+});
+const releases = JSON.stringify({ releases: [edition('single', 'Single', '2018', 1), edition('album', 'Album', '2019-06-01', 3)] });
 const relayURL = 'wss://relay.invalid/socket';
 const healthURL = 'https://relay.invalid/healthz';
 
@@ -25,7 +30,8 @@ async function open(t) {
     if (url.href === healthURL) return route.fulfill({ contentType: 'text/plain', body: 'ok' });
     if (url.origin === 'https://musicbrainz.org') {
       musicbrainzRequests.push(url);
-      return route.fulfill({ contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*' }, body: musicbrainz });
+      const body = url.pathname === '/ws/2/release/' ? releases : musicbrainz;
+      return route.fulfill({ contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*' }, body });
     }
     return route.abort();
   });
@@ -228,22 +234,36 @@ test('finds an album folder, saves its songs as a zip, and cancels the rest', { 
   const { page, mock, musicbrainzRequests } = await signedIn(t);
 
   await page.getByLabel('Search for').selectOption('Album');
-  await page.getByText('Search Soulseek for an album', { exact: true }).waitFor();
+  await page.getByText('Search MusicBrainz for an album', { exact: true }).waitFor();
   const query = page.getByLabel('Artist and album');
   assert.equal(await query.getAttribute('placeholder'), 'Artist and album');
   await query.fill('glass harbor tidewater');
-  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  const search = page.getByRole('button', { name: 'Search', exact: true });
+  const albums = page.locator('#soulseek-songs label');
+  const findAlbum = async () => {
+    await search.click();
+    await page.getByRole('heading', { name: 'Choose an album', level: 2 }).waitFor();
+    await albums.first().click();
+    await page.getByRole('button', { name: 'Find downloads' }).click();
+    await page.getByText('Found 3 album folders.', { exact: true }).waitFor();
+  };
+  await search.click();
+  await page.getByText('Found 2 albums.', { exact: true }).waitFor();
+  assert.deepEqual(await albums.locator('.file-details').allTextContents(), ['The Glass Harbor · 2019 · 3 songs', 'The Glass Harbor · 2018 · 1 song']);
+  assert.equal(musicbrainzRequests.at(-1).pathname, '/ws/2/release/');
+  assert.equal(musicbrainzRequests.at(-1).searchParams.get('query'), 'glass harbor tidewater');
+  await albums.first().click();
+  await page.getByRole('button', { name: 'Find downloads' }).click();
   await page.getByText('Found 3 album folders.', { exact: true }).waitFor();
-  assert.equal(await mock(() => globalThis.nicotineMock.query), 'glass harbor tidewater');
-  assert.equal(musicbrainzRequests.length, 0, 'album search stays on Soulseek');
+  assert.equal(await mock(() => globalThis.nicotineMock.query), 'The Glass Harbor Tidewater');
   await page.getByRole('heading', { name: 'Choose an album folder', level: 2 }).waitFor();
-  assert.equal(await page.locator('#soulseek-track').textContent(), 'glass harbor tidewater');
+  assert.equal(await page.locator('#soulseek-track').textContent(), 'The Glass Harbor · Tidewater');
   const rows = page.locator('#soulseek-results label');
-  assert.deepEqual(await rows.locator('.file-name').allTextContents(), ['Locked', 'Tidewater (2019)', 'Glass Harbor - Tidewater']);
+  assert.deepEqual(await rows.locator('.file-name').allTextContents(), ['Tidewater (2019)', 'Glass Harbor - Tidewater', 'Locked']);
   assert.deepEqual(await rows.locator('.file-details').allTextContents(), [
-    'harbor-light · free slot · 1 song · mp3',
     'quiet-keeper · free slot · 4 songs · mp3',
     'salt-marsh · queue 518 · 2 songs · flac',
+    'harbor-light · free slot · 1 song · mp3',
   ]);
   const row = (name) => rows.filter({ hasText: name });
   const downloadButton = page.getByRole('button', { name: 'Download album' });
@@ -255,9 +275,7 @@ test('finds an album folder, saves its songs as a zip, and cancels the rest', { 
   await page.getByText('Could not list the folder: The peer did not list the folder in time', { exact: true }).waitFor();
   assert.equal(await page.getByRole('link', { name: /^Save/ }).count(), 0);
 
-  const search = page.getByRole('button', { name: 'Search', exact: true });
-  await search.click();
-  await page.getByText('Found 3 album folders.', { exact: true }).waitFor();
+  await findAlbum();
   await row('Tidewater (2019)').click();
   await downloadButton.click();
   await page.getByLabel('Artist and album').waitFor();
@@ -292,8 +310,7 @@ test('finds an album folder, saves its songs as a zip, and cancels the rest', { 
   await page.getByRole('heading', { name: 'Downloads', level: 2 }).waitFor({ state: 'hidden' });
   assert.equal(await page.evaluate((url) => fetch(url).then(() => 'readable', () => 'released'), href), 'released');
 
-  await search.click();
-  await page.getByText('Found 3 album folders.', { exact: true }).waitFor();
+  await findAlbum();
   await row('Glass Harbor - Tidewater').click();
   await downloadButton.click();
   await page.getByText('01 Slow.flac · Queued, position 2', { exact: true }).waitFor();

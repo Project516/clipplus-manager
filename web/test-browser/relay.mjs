@@ -40,6 +40,10 @@ test('the production build connects from saved settings and sends a search throu
         headers: { 'Access-Control-Allow-Origin': '*' },
       });
     }
+    if (url.origin === 'https://musicbrainz.org') {
+      const releases = [{ title: 'Query', 'track-count': 1, 'artist-credit': [{ name: 'Fixture' }], 'release-group': { id: 'fixture', title: 'Query', 'primary-type': 'Album' } }];
+      return route.fulfill({ contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ releases }) });
+    }
     return route.abort();
   });
 
@@ -69,8 +73,10 @@ test('the production build connects from saved settings and sends a search throu
   await page.getByLabel('Search for').selectOption('Album');
   await page.getByLabel('Artist and album').fill('fixture query');
   await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await page.locator('#soulseek-songs label').first().click();
+  await page.getByRole('button', { name: 'Find downloads' }).click();
   const search = await searched.promise;
-  assert.equal(search.toString('utf8', 16), 'fixture query');
+  assert.equal(search.toString('utf8', 16), 'Fixture Query');
 
   await page.getByRole('button', { name: 'Back' }).click();
   await page.getByRole('button', { name: 'Disconnect' }).click();
