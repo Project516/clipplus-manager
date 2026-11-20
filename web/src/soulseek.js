@@ -1,3 +1,5 @@
+import { words } from './musicbrainz.js';
+
 // Formats Rockbox plays on the Clip+.
 export const PLAYABLE = ['mp3', 'flac', 'ogg', 'opus', 'm4a'];
 export const RESULT_LIMIT = 200;
@@ -20,6 +22,17 @@ function rank(a, b) {
 }
 
 export const albumRank = (a, b) => peerRank(a, b) || b.uploadSpeed - a.uploadSpeed;
+
+// Port of rank_album_folders: folders named for the album with every song first, then albumRank.
+export function albumFolderRank({ title, tracks }) {
+  const wanted = words(title);
+  const named = (group) => {
+    const have = new Set(words(group.name));
+    return wanted.every((word) => have.has(word));
+  };
+  const tier = (group) => (named(group) ? 0 : 2) + (group.songs >= tracks ? 0 : 1);
+  return (a, b) => tier(a) - tier(b) || albumRank(a, b);
+}
 
 const queueText = ({ freeSlot, queueLength }) => (freeSlot ? 'free slot' : `queue ${queueLength}`);
 

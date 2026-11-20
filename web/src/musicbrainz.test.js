@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { parseRecordings, recordingDetails, searchRecordings, words } from './musicbrainz.js';
+import { parseReleases, parseRecordings, recordingDetails, releaseDetails, searchRecordings, words } from './musicbrainz.js';
 
 const fixture = async () => JSON.parse(await readFile(new URL('../test-fixtures/musicbrainz.json', import.meta.url), 'utf8'));
 const id = (n) => `00000000-0000-4000-8000-00000000000${n}`;
@@ -172,4 +172,26 @@ test('passes an abort through unchanged, also while waiting to retry', async () 
   later.abort();
   await assert.rejects(pending, (error) => error === later.signal.reason);
   assert.equal(calls, 1);
+});
+
+// core/src/musicbrainz.rs checks the same order.
+test('groups album editions and ranks studio albums first', () => {
+  const edition = (group, title, artist, kind, date, tracks) => {
+    const [primary, ...secondary] = kind.split('+');
+    return { title, date, score: 100, 'track-count': tracks, 'artist-credit': [{ name: artist }],
+      'release-group': { id: group, title, 'primary-type': primary, 'secondary-types': secondary } };
+  };
+  const albums = parseReleases({ releases: [
+    edition('live', 'Glass Harbor Live', 'Glass Harbor', 'Album+Live', '2021', 20),
+    edition('single', 'Tidewater', 'Glass Harbor', 'Single', '2018-05', 1),
+    edition('tribute', 'Tidewater', 'Salt Choir', 'Album', '2015', 9),
+    edition('ep', 'Low Tide', 'Glass Harbor', 'EP', '2016', 4),
+    edition('album', 'Tidewater', 'Glass Harbor', 'Album', '2019-03-01', 14),
+    edition('album', 'Tidewater (deluxe)', 'Glass Harbor', 'Album', '2018-11-02', 12),
+    edition('album', 'Tidewater', 'Glass Harbor', 'Album', '', 0),
+    { title: 'No group', 'artist-credit': [{ name: 'Glass Harbor' }] },
+  ] }, 'glass harbor');
+  assert.deepEqual(albums.map((album) => album.id), ['album', 'ep', 'live', 'single', 'tribute']);
+  assert.deepEqual(albums[0], { id: 'album', title: 'Tidewater', artist: 'Glass Harbor', year: '2018', tracks: 12 });
+  assert.equal(releaseDetails(albums[0]), 'Glass Harbor · 2018 · 12 songs');
 });

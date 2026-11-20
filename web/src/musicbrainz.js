@@ -1,7 +1,8 @@
 // Port of core/src/musicbrainz.rs. Keep the two in step.
 import { formatDuration } from './soulseek.js';
 
-const ENDPOINT = 'https://musicbrainz.org/ws/2/recording/';
+const RECORDINGS = 'https://musicbrainz.org/ws/2/recording/';
+const RELEASES = 'https://musicbrainz.org/ws/2/release/';
 
 // Lowercase words made of letters, digits and apostrophes.
 export function words(text) {
@@ -54,6 +55,58 @@ export function parseRecordings(json, query) {
   return songs;
 }
 
+// Lower is better: studio albums, EPs, other albums, then singles and the rest.
+function groupKind(group) {
+  const secondary = group['secondary-types'] ?? [];
+  if (group['primary-type'] === 'Album' && secondary.every((type) => type === 'Soundtrack')) return 0;
+  if (group['primary-type'] === 'EP') return 1;
+  if (group['primary-type'] === 'Album') return 2;
+  return 3;
+}
+
+const credit = (credits) => (credits ?? []).map((c) => `${c.name}${c.joinphrase ?? ''}`).join('');
+
+// One row per release group. Albums with every query word come first, then studio albums.
+export function parseReleases(json, query) {
+  if (!Array.isArray(json?.releases)) throw new Error('no releases');
+  const found = new Map();
+  for (const release of json.releases) {
+    const group = release['release-group'];
+    if (!group?.id) continue;
+    const year = release.date?.length >= 4 ? release.date.slice(0, 4) : undefined;
+    const tracks = release['track-count'] ?? 0;
+    const entry = found.get(group.id);
+    if (entry) {
+      if (tracks > 0 && (!entry.album.tracks || tracks < entry.album.tracks)) entry.album.tracks = tracks;
+      if (year && (!entry.album.year || year < entry.album.year)) entry.album.year = year;
+      entry.score = Math.max(entry.score, release.score ?? 0);
+      entry.releases += 1;
+      continue;
+    }
+    found.set(group.id, {
+      album: { id: group.id, title: group.title ?? release.title, artist: credit(release['artist-credit']), year, tracks },
+      kind: groupKind(group),
+      score: release.score ?? 0,
+      releases: 1,
+      index: found.size,
+    });
+  }
+  const wanted = new Set(words(query));
+  const ranked = [...found.values()].map((entry) => {
+    const have = new Set(words(`${entry.album.artist} ${entry.album.title}`));
+    const missing = [...wanted].filter((word) => !have.has(word)).length;
+    const extra = [...have].filter((word) => !wanted.has(word)).length;
+    return { ...entry, missing, extra };
+  });
+  ranked.sort((a, b) => a.missing - b.missing || a.kind - b.kind || a.extra - b.extra
+    || b.score - a.score || b.releases - a.releases || a.index - b.index);
+  return ranked.map((entry) => entry.album);
+}
+
+export function releaseDetails({ artist, year, tracks }) {
+  return [artist, year, tracks && `${tracks} ${tracks === 1 ? 'song' : 'songs'}`].filter(Boolean).join(' · ');
+}
+
 export function recordingDetails({ artist, release, lengthMs }) {
   return [artist, release, lengthMs && formatDuration(Math.floor(lengthMs / 1000))].filter(Boolean).join(' · ');
 }
@@ -95,14 +148,14 @@ async function requestJSON(url, signal) {
 }
 
 // One request per call, plus one retry when MusicBrainz is busy. Browsers cannot set User-Agent, so the page origin identifies the client.
-export async function searchRecordings(query, { signal, retryDelayMs = 1500 } = {}) {
+async function search(endpoint, parse, query, { signal, retryDelayMs = 1500 } = {}) {
   if (!words(query).length) return [];
-  const url = new URL(ENDPOINT);
+  const url = new URL(endpoint);
   // dismax takes the words as plain text and tolerates extra or missing ones.
   url.searchParams.set('query', query.trim().split(/\s+/).join(' '));
   url.searchParams.set('dismax', 'true');
   url.searchParams.set('fmt', 'json');
-  // Each song repeats once per release, so ask for more than we show.
+  // Each song or album repeats once per release, so ask for more than we show.
   url.searchParams.set('limit', '100');
   let json;
   try {
@@ -113,8 +166,11 @@ export async function searchRecordings(query, { signal, retryDelayMs = 1500 } = 
     json = await requestJSON(url, signal);
   }
   try {
-    return parseRecordings(json, query);
+    return parse(json, query);
   } catch (error) {
     throw new Error(`MusicBrainz response: ${error?.message ?? error}`);
   }
 }
+
+export const searchRecordings = (query, options) => search(RECORDINGS, parseRecordings, query, options);
+export const searchAlbums = (query, options) => search(RELEASES, parseReleases, query, options);

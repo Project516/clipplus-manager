@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -582,6 +583,22 @@ pub fn album_candidates(files: Vec<PeerFile>) -> Vec<PeerFile> {
     folders
 }
 
+/// Folders named for the album with every song first, then by peer queue and speed.
+pub fn rank_album_folders(folders: &mut [PeerFile], album: &crate::musicbrainz::Album) {
+    let wanted = crate::musicbrainz::words(&album.title);
+    let tier = |folder: &PeerFile| {
+        let name = folder
+            .filename
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or_default();
+        let have: HashSet<String> = crate::musicbrainz::words(name).into_iter().collect();
+        let named = wanted.iter().all(|word| have.contains(word));
+        u8::from(!named) * 2 + u8::from(folder.size < u64::from(album.tracks))
+    };
+    folders.sort_by(|a, b| tier(a).cmp(&tier(b)).then(album_order(a, b)));
+}
+
 fn parse_directory(value: &Value, username: &str, directory: &str) -> Vec<PeerFile> {
     let separator = if directory.contains('/') { '/' } else { '\\' };
     value
@@ -698,6 +715,51 @@ mod tests {
         assert_eq!(names, ["fast", "slow", "short", "long"]);
         assert_eq!(folders[2].queue_length, 2);
         assert!(folders[0].free_slot);
+    }
+
+    // web/src/soulseek.test.js checks the same order.
+    #[test]
+    fn ranks_album_folders_named_for_the_album_with_every_song_first() {
+        let response = |name: &str, free: bool, files: &[&str]| {
+            let files: Vec<Value> = files
+                .iter()
+                .map(|file| json!({"filename": file, "size": 100}))
+                .collect();
+            json!({"username": name, "hasFreeUploadSlot": free, "queueLength": if free { 0 } else { 3 }, "files": files})
+        };
+        let deluxe = "Band\\2019 - Tidewater (Deluxe)\\";
+        let results = parse_results(&json!([
+            response("single", true, &["Band\\Tidewater\\01.flac"]),
+            response(
+                "other",
+                true,
+                &[
+                    "Band\\Low Tide\\01.mp3",
+                    "Band\\Low Tide\\02.mp3",
+                    "Band\\Low Tide\\03.mp3"
+                ]
+            ),
+            response(
+                "full",
+                false,
+                &[
+                    &format!("{deluxe}01.mp3"),
+                    &format!("{deluxe}02.mp3"),
+                    &format!("{deluxe}03.mp3")
+                ]
+            ),
+        ]));
+        let mut folders = album_candidates(results);
+        let album = crate::musicbrainz::Album {
+            id: "album".into(),
+            title: "Tidewater".into(),
+            artist: "Band".into(),
+            year: None,
+            tracks: 3,
+        };
+        rank_album_folders(&mut folders, &album);
+        let names: Vec<_> = folders.iter().map(|f| f.username.as_str()).collect();
+        assert_eq!(names, ["full", "single", "other"]);
     }
 
     #[test]
