@@ -182,8 +182,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0
       '@project516/yt-dlp-wasm':
-        specifier: 0.6.3
-        version: 0.6.3
+        specifier: 0.7.0
+        version: 0.7.0
     devDependencies:
       playwright-core:
         specifier: 1.65.0
@@ -376,8 +376,8 @@ packages:
     resolution: {integrity: sha512-bcCpVcWGg89xpfvG8xDUHZI0FqJRYYX4HIWlAHDW3eE1hM7FRwVG1uoGlBFuIDUvZ+lDM8FZkOp4A0XucrpR5g==}
     engines: {node: '>=22.14'}
 
-  '@project516/yt-dlp-wasm@0.6.3':
-    resolution: {integrity: sha512-8CcEWPljvEhAsWTP/0Eoykkv2yBSy+7j7SalICIpv0reHIeSHBEHI9Tk1Ll6O1ZQ528EbxQr1U7t8EsNRLfUDw==}
+  '@project516/yt-dlp-wasm@0.7.0':
+    resolution: {integrity: sha512-g/vqO+G6MqG1L5t5ghDEQnrcm3cwENklP7BuTe10NbeauP3UKXB5JYaKrSMNIjY0g8SdNM9Sj/Fj8gllyomV3Q==}
     engines: {node: '>=25'}
     hasBin: true
 
@@ -744,7 +744,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@project516/yt-dlp-wasm@0.6.3':
+  '@project516/yt-dlp-wasm@0.7.0':
     dependencies:
       '@project516/ffmpeg-wasm-core-jspi': 0.19.0
       pyodide: 314.0.8
