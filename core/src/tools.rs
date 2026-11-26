@@ -11,8 +11,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const FFMPEG_BASE: &str = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Tool {
     Ffmpeg,
@@ -105,36 +103,92 @@ pub struct Latest {
     pub sha256: String,
 }
 
-/// The newest stable-branch GPL build in BtbN's checksum list.
-pub fn pick_ffmpeg(checksums: &str) -> Option<Latest> {
-    let mut best: Option<Latest> = None;
-    for line in checksums.lines() {
-        let mut parts = line.split_whitespace();
-        let (Some(hash), Some(name)) = (parts.next(), parts.next()) else {
-            continue;
-        };
-        let name = name.trim_start_matches('*');
-        let Some(version) = name
-            .strip_prefix("ffmpeg-n")
-            .and_then(|rest| rest.strip_suffix(".tar.xz"))
-            .and_then(|rest| rest.split_once("-latest-linux64-gpl-"))
-            .filter(|(branch, again)| branch == again)
-            .map(|(branch, _)| branch)
-        else {
-            continue;
-        };
-        if !is_sha256(hash) || version.split('.').any(|p| p.parse::<u32>().is_err()) {
-            continue;
+fn is_dotted(s: &str) -> bool {
+    s.split('.')
+        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The FFmpeg release in a stable-branch GPL asset name, such as `9.0.2` from
+/// `ffmpeg-n9.0.2-982-g836df4e858-linux64-gpl-9.0.tar.xz`. A build exactly on
+/// a tag has no count and hash. Master and shared builds give None.
+fn ffmpeg_version(name: &str) -> Option<&str> {
+    let (build, branch) = name
+        .strip_prefix("ffmpeg-n")?
+        .strip_suffix(".tar.xz")?
+        .split_once("-linux64-gpl-")?;
+    let mut parts = build.split('-');
+    let version = parts.next()?;
+    let git_ok = match (parts.next(), parts.next(), parts.next()) {
+        (None, ..) => true,
+        (Some(count), Some(hash), None) => {
+            count.bytes().all(|b| b.is_ascii_digit()) && hash.starts_with('g')
         }
+        _ => false,
+    };
+    (git_ok && is_dotted(version) && is_dotted(branch)).then_some(version)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct FfmpegBuild {
+    pub version: String,
+    pub name: String,
+    pub url: String,
+    pub sums_url: String,
+}
+
+/// The newest stable-branch GPL build in one BtbN release.
+pub fn pick_ffmpeg(release: &Value) -> Option<FfmpegBuild> {
+    let assets = release.get("assets")?.as_array()?;
+    let link = |a: &Value| a.get("browser_download_url")?.as_str().map(str::to_string);
+    let sums_url = assets
+        .iter()
+        .find(|a| a.get("name").and_then(Value::as_str) == Some("checksums.sha256"))
+        .and_then(link)?;
+    let mut best: Option<FfmpegBuild> = None;
+    for asset in assets {
+        let Some(name) = asset.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let (Some(version), Some(url)) = (ffmpeg_version(name), link(asset)) else {
+            continue;
+        };
         if best.as_ref().is_none_or(|b| is_newer(version, &b.version)) {
-            best = Some(Latest {
+            best = Some(FfmpegBuild {
                 version: version.to_string(),
-                url: format!("{FFMPEG_BASE}/{name}"),
-                sha256: hash.to_lowercase(),
+                name: name.to_string(),
+                url,
+                sums_url: sums_url.clone(),
             });
         }
     }
     best
+}
+
+/// Daily builds change the commit count, not the release, so the release
+/// version is what decides whether to download.
+fn latest_ffmpeg(agent: &ureq::Agent) -> Result<Latest, String> {
+    let releases = net::get_json(
+        agent,
+        "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=5",
+    )?;
+    let build = releases
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| {
+            r.get("tag_name")
+                .and_then(Value::as_str)
+                .is_some_and(|t| t.starts_with("autobuild-"))
+        })
+        .find_map(pick_ffmpeg)
+        .ok_or_else(|| "ffmpeg: no stable build listed".to_string())?;
+    let sha256 = find_sha(&net::get_text(agent, &build.sums_url)?, Some(&build.name))
+        .ok_or_else(|| format!("ffmpeg: no checksum for {}", build.name))?;
+    Ok(Latest {
+        version: build.version,
+        url: build.url,
+        sha256,
+    })
 }
 
 /// Version and asset links from a GitHub `releases/latest` answer.
@@ -189,10 +243,7 @@ pub fn fetch_latest(agent: &ureq::Agent, tool: Tool) -> Result<Latest, String> {
             "deno-x86_64-unknown-linux-gnu.zip.sha256sum",
             None,
         ),
-        Tool::Ffmpeg => {
-            let text = net::get_text(agent, &format!("{FFMPEG_BASE}/checksums.sha256"))?;
-            pick_ffmpeg(&text).ok_or_else(|| "ffmpeg: no stable build listed".to_string())
-        }
+        Tool::Ffmpeg => latest_ffmpeg(agent),
     }
 }
 
@@ -469,28 +520,63 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_ffmpeg_release_from_asset_names() {
+        let v = ffmpeg_version;
+        assert_eq!(
+            v("ffmpeg-n9.0.2-982-g836df4e858-linux64-gpl-9.0.tar.xz"),
+            Some("9.0.2")
+        );
+        assert_eq!(v("ffmpeg-n9.0.2-linux64-gpl-9.0.tar.xz"), Some("9.0.2"));
+        assert_eq!(
+            v("ffmpeg-n10.1-3-gabc-linux64-gpl-10.1.tar.xz"),
+            Some("10.1")
+        );
+        assert_eq!(v("ffmpeg-N-129308-g17de9f8597-linux64-gpl.tar.xz"), None);
+        assert_eq!(
+            v("ffmpeg-n9.0.2-1-gabc-linux64-gpl-shared-9.0.tar.xz"),
+            None
+        );
+        assert_eq!(v("ffmpeg-n9.0.2-1-gabc-linux64-lgpl-9.0.tar.xz"), None);
+        assert_eq!(v("ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz"), None);
+        assert_eq!(v("ffmpeg-n9.1-dev-4-gabc-linux64-gpl-9.1.tar.xz"), None);
+        assert_eq!(v("ffmpeg-n9.0.2-1-gabc-winarm64-gpl-9.0.zip"), None);
+    }
+
+    #[test]
     fn picks_the_newest_stable_gpl_ffmpeg() {
-        let list = format!(
-            "{A}  ffmpeg-master-latest-linux64-gpl.tar.xz\n\
-             {A}  ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz\n\
-             {B}  ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz\n\
-             {A}  ffmpeg-n9.0-latest-linux64-gpl-shared-9.0.tar.xz\n\
-             {A}  ffmpeg-n10.0-latest-linux64-lgpl-10.0.tar.xz\n\
-             {A}  ffmpeg-n9.1-latest-winarm64-gpl-9.1.zip\n"
-        );
-        let latest = pick_ffmpeg(&list).unwrap();
-        assert_eq!(latest.version, "9.0");
-        assert_eq!(latest.sha256, B);
-        assert!(
-            latest
-                .url
-                .ends_with("/latest/ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz")
-        );
-        let tens = format!(
-            "{A}  ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz\n{B}  ffmpeg-n10.1-latest-linux64-gpl-10.1.tar.xz\n"
-        );
-        assert_eq!(pick_ffmpeg(&tens).unwrap().version, "10.1");
-        assert_eq!(pick_ffmpeg("junk"), None);
+        let names = [
+            "checksums.sha256",
+            "ffmpeg-N-129308-g17de9f8597-linux64-gpl.tar.xz",
+            "ffmpeg-n8.1.3-41-ga8029b6528-linux64-gpl-8.1.tar.xz",
+            "ffmpeg-n9.0.2-982-g836df4e858-linux64-gpl-shared-9.0.tar.xz",
+            "ffmpeg-n9.0.2-982-g836df4e858-linux64-gpl-9.0.tar.xz",
+            "ffmpeg-n9.0.2-982-g836df4e858-linux64-lgpl-9.0.tar.xz",
+        ];
+        let release = serde_json::json!({
+            "tag_name": "autobuild-2026-11-26-12-56",
+            "assets": names.map(|n| serde_json::json!({
+                "name": n,
+                "browser_download_url": format!("https://x/{n}"),
+            })),
+        });
+        let build = pick_ffmpeg(&release).unwrap();
+        assert_eq!(build.version, "9.0.2");
+        assert_eq!(build.name, names[4]);
+        assert_eq!(build.url, format!("https://x/{}", names[4]));
+        assert_eq!(build.sums_url, "https://x/checksums.sha256");
+
+        let no_sums = serde_json::json!({"assets": [
+            {"name": names[4], "browser_download_url": "https://x/a"}]});
+        assert_eq!(pick_ffmpeg(&no_sums), None);
+        assert_eq!(pick_ffmpeg(&serde_json::json!({"assets": []})), None);
+    }
+
+    #[test]
+    fn a_new_ffmpeg_build_of_the_same_release_is_not_newer() {
+        assert!(!is_newer("9.0.2", "9.0.2"));
+        assert!(is_newer("9.0.3", "9.0.2"));
+        assert!(is_newer("9.0.2", "9.0"));
+        assert!(is_newer("9.1", "9.0.2"));
     }
 
     #[test]
@@ -578,10 +664,19 @@ mod tests {
             let encoder = liblzma::write::XzEncoder::new(File::create(&archive).unwrap(), 1);
             let mut builder = tar::Builder::new(encoder);
             for (path, body) in [
-                ("ffmpeg-n9.0/LICENSE", "x"),
-                ("ffmpeg-n9.0/bin/ffmpeg", "ff"),
-                ("ffmpeg-n9.0/bin/ffplay", "pl"),
-                ("ffmpeg-n9.0/bin/ffprobe", "pr"),
+                ("ffmpeg-n9.0.2-982-g836df4e858-linux64-gpl-9.0/LICENSE", "x"),
+                (
+                    "ffmpeg-n9.0.2-982-g836df4e858-linux64-gpl-9.0/bin/ffmpeg",
+                    "ff",
+                ),
+                (
+                    "ffmpeg-n9.0.2-982-g836df4e858-linux64-gpl-9.0/bin/ffplay",
+                    "pl",
+                ),
+                (
+                    "ffmpeg-n9.0.2-982-g836df4e858-linux64-gpl-9.0/bin/ffprobe",
+                    "pr",
+                ),
             ] {
                 let mut header = tar::Header::new_gnu();
                 header.set_size(body.len() as u64);
