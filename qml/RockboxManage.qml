@@ -176,7 +176,7 @@ ColumnLayout {
         Delegates.SwitchSubtitleDelegate {
             Layout.fillWidth: true
             text: "Update the database automatically"
-            subtitle: manage.databaseKnown ? "New songs show up without opening Settings > General Settings > Database > Update Now on the player." : "The setting could not be read from the player. Turn it on or off here to set it."
+            subtitle: manage.databaseKnown ? "The player updates at startup when songs changed. Wait for it to finish before you press play, or Rockbox can crash." : "The setting could not be read from the player. Turn it on or off here to set it."
             enabled: !manage.busy
             checked: manage.databaseAutoUpdate
             onToggled: manage.databaseAutoUpdateToggled(checked)

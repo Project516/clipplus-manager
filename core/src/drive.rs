@@ -305,7 +305,9 @@ impl Drive {
             io::copy(data, &mut file).map_err(|e| e.to_string())?;
             file.sync_all().map_err(|e| e.to_string())?;
             self.check()?;
-            renameat(&parent, &temp, &parent, *name).map_err(text)
+            renameat(&parent, &temp, &parent, *name).map_err(text)?;
+            // vfat writes the renamed entry with size 0 until the inode is flushed.
+            file.sync_all().map_err(|e| e.to_string())
         })();
         if result.is_err() && !self.lost() {
             let _ = unlinkat(&parent, &temp, AtFlags::empty());
@@ -329,7 +331,16 @@ impl Drive {
             .dir_of(to_dir, false)
             .map_err(|e| format!("{}: {}", to.text(), text(e)))?;
         renameat(&from_parent, *from_name, &to_parent, *to_name)
-            .map_err(|e| format!("{} to {}: {}", from.text(), to.text(), text(e)))
+            .map_err(|e| format!("{} to {}: {}", from.text(), to.text(), text(e)))?;
+        // vfat writes the renamed entry with size 0 until the inode is flushed.
+        let fd = openat(
+            &to_parent,
+            *to_name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| format!("{}: {}", to.text(), text(e)))?;
+        fsync(&fd).map_err(|e| format!("{}: {}", to.text(), text(e)))
     }
 
     /// Returns false when the file was not there or could not be removed.

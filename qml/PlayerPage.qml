@@ -110,7 +110,7 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
             visible: page.backend.songsCopied && page.firmware === "rockbox" && !page.backend.databaseAutoUpdate
             type: Kirigami.MessageType.Information
-            text: "Songs were copied. On the player, open Settings > General Settings > Database > Update Now so they show up."
+            text: "Songs were copied. On the player, open Settings > General Settings > Database > Update Now so they show up. Wait for the update to finish before you press play, or Rockbox can crash."
             showCloseButton: false
             actions: [
                 Kirigami.Action {
