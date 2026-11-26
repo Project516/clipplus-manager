@@ -140,9 +140,11 @@ fn copy_with_temp(
         written = Some(temp.to_path_buf());
         io::copy(&mut source, &mut sink)?;
         sink.sync_all()?;
-        drop(sink);
         let target = publish(temp, tracks, stem, ext)?;
         written = Some(target.clone());
+        // vfat writes the renamed entry with size 0 until the inode is flushed.
+        sink.sync_all()?;
+        drop(sink);
         File::open(tracks)?.sync_all()?;
         if !same_content(outbox_file, &target, true)? {
             return Err(io::Error::other("The copy does not match the original"));

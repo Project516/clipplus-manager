@@ -147,10 +147,13 @@ fn write_to_player(drive: &Drive, data: &[u8], progress: &dyn Fn(&str)) -> Resul
     let (staging, target) = (RelPath::parse(STAGING_FILE)?, RelPath::parse(OF_FILE)?);
     let result = write_checked(drive, &staging, data).and_then(|()| {
         drive.rename(&staging, &target)?;
-        drive.sync_dir(Path::new("")).inspect_err(|_| {
-            // The rename may not survive, so the player must not find the file either.
-            let _ = drive.remove_file(&target);
-        })
+        drive
+            .sync_file(&target)
+            .and_then(|()| drive.sync_dir(Path::new("")))
+            .inspect_err(|_| {
+                // The rename may not survive, so the player must not find the file either.
+                let _ = drive.remove_file(&target);
+            })
     });
     if result.is_err() {
         let _ = drive.remove_file(&staging);

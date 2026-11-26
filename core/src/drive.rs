@@ -305,7 +305,9 @@ impl Drive {
             io::copy(data, &mut file).map_err(|e| e.to_string())?;
             file.sync_all().map_err(|e| e.to_string())?;
             self.check()?;
-            renameat(&parent, &temp, &parent, *name).map_err(text)
+            renameat(&parent, &temp, &parent, *name).map_err(text)?;
+            // vfat writes the renamed entry with size 0 until the inode is flushed.
+            file.sync_all().map_err(|e| e.to_string())
         })();
         if result.is_err() && !self.lost() {
             let _ = unlinkat(&parent, &temp, AtFlags::empty());
@@ -330,6 +332,24 @@ impl Drive {
             .map_err(|e| format!("{}: {}", to.text(), text(e)))?;
         renameat(&from_parent, *from_name, &to_parent, *to_name)
             .map_err(|e| format!("{} to {}: {}", from.text(), to.text(), text(e)))
+    }
+
+    /// Flushes a file. Call it after `rename`: vfat writes the renamed entry
+    /// with size 0 until the file itself is flushed.
+    pub fn sync_file(&self, rel: &RelPath) -> Result<(), String> {
+        self.check()?;
+        let fail = |e: Errno| format!("{}: {}", rel.text(), text(e));
+        let names = parts(&rel.path);
+        let (name, parents) = names.split_last().ok_or("empty path")?;
+        let parent = self.dir_of(parents, false).map_err(fail)?;
+        let fd = openat(
+            &parent,
+            *name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(fail)?;
+        fsync(&fd).map_err(fail)
     }
 
     /// Returns false when the file was not there or could not be removed.
