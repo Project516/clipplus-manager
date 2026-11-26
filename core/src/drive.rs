@@ -331,16 +331,25 @@ impl Drive {
             .dir_of(to_dir, false)
             .map_err(|e| format!("{}: {}", to.text(), text(e)))?;
         renameat(&from_parent, *from_name, &to_parent, *to_name)
-            .map_err(|e| format!("{} to {}: {}", from.text(), to.text(), text(e)))?;
-        // vfat writes the renamed entry with size 0 until the inode is flushed.
+            .map_err(|e| format!("{} to {}: {}", from.text(), to.text(), text(e)))
+    }
+
+    /// Flushes a file. Call it after `rename`: vfat writes the renamed entry
+    /// with size 0 until the file itself is flushed.
+    pub fn sync_file(&self, rel: &RelPath) -> Result<(), String> {
+        self.check()?;
+        let fail = |e: Errno| format!("{}: {}", rel.text(), text(e));
+        let names = parts(&rel.path);
+        let (name, parents) = names.split_last().ok_or("empty path")?;
+        let parent = self.dir_of(parents, false).map_err(fail)?;
         let fd = openat(
-            &to_parent,
-            *to_name,
+            &parent,
+            *name,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|e| format!("{}: {}", to.text(), text(e)))?;
-        fsync(&fd).map_err(|e| format!("{}: {}", to.text(), text(e)))
+        .map_err(fail)?;
+        fsync(&fd).map_err(fail)
     }
 
     /// Returns false when the file was not there or could not be removed.
