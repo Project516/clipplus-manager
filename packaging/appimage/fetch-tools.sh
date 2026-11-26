@@ -39,18 +39,30 @@ unzip -p "$tmp/deno.zip" deno >"$dir/deno"
 chmod 755 "$dir/deno"
 deno_version=${tag#v}
 
-# ffmpeg: the newest stable branch build
-base="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
-curl -fsSL -o "$tmp/checksums.sha256" "$base/checksums.sha256"
-pick=$(sed -nE 's/^([0-9a-f]{64}) +\*?(ffmpeg-n([0-9]+\.[0-9]+)-latest-linux64-gpl-\3\.tar\.xz)$/\3 \1 \2/p' "$tmp/checksums.sha256" | sort -V | tail -1)
+# ffmpeg: the newest stable branch build in the newest dated release
+releases=$(curl -fsSL -H 'Accept: application/vnd.github+json' \
+  "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=5")
+pick=$(jq -r '
+  [.[] | select(.tag_name | startswith("autobuild-"))][0].assets as $assets
+  | [$assets[] | select(.name | test("^ffmpeg-n[0-9.]+(-[0-9]+-g[0-9a-f]+)?-linux64-gpl-[0-9.]+\\.tar\\.xz$"))
+     | {name, url: .browser_download_url,
+        key: (.name | capture("^ffmpeg-n(?<v>[0-9.]+)").v | split(".") | map(tonumber))}]
+  | sort_by(.key) | last // empty
+  | [.name, .url, ($assets[] | select(.name == "checksums.sha256") | .browser_download_url)]
+  | @tsv' <<<"$releases")
 [ -n "$pick" ] || { echo "no stable ffmpeg build listed" >&2; exit 1; }
-read -r ffmpeg_version hash name <<<"$pick"
-curl -fsSL -o "$tmp/$name" "$base/$name"
+IFS=$'\t' read -r name url sums_url <<<"$pick"
+curl -fsSL -o "$tmp/checksums.sha256" "$sums_url"
+hash=$(awk -v n="$name" '$2 == n || $2 == "*" n {print $1}' "$tmp/checksums.sha256")
+curl -fsSL -o "$tmp/$name" "$url"
 (cd "$tmp" && verify "$name" "$hash")
 tar -xJf "$tmp/$name" -C "$dir" --strip-components=2 --wildcards '*/bin/ffmpeg' '*/bin/ffprobe'
 
 for tool in "$dir/yt-dlp" "$dir/deno"; do "$tool" --version >/dev/null; done
 for tool in "$dir/ffmpeg" "$dir/ffprobe"; do "$tool" -version >/dev/null; done
+# The release the app compares against, not the build count.
+ffmpeg_version=$("$dir/ffmpeg" -version | sed -nE '1s/^ffmpeg version n([0-9]+(\.[0-9]+)+).*/\1/p')
+[ -n "$ffmpeg_version" ] || { echo "cannot read the ffmpeg version" >&2; exit 1; }
 
 printf '{\n  "deno": "%s",\n  "ffmpeg": "%s",\n  "yt-dlp": "%s"\n}\n' \
   "$deno_version" "$ffmpeg_version" "$ytdlp_version" >"$dir/versions.json"
